@@ -4,6 +4,18 @@ All notable changes to reclipz are documented here. The format is loosely based 
 [Keep a Changelog](https://keepachangelog.com/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- Fail fast with an actionable message when the embedded engine cannot execute (for example the
+  `-musl` release on a glibc host: `FileNotFound` because `/lib/ld-musl-*.so.1` is missing).
+  The server now probes `<engine> --version` at startup, and `selftest`/`reclipz yt-dlp` print the
+  same hints. The API error is now `Engine failed to start (…) — run `reclipz selftest``.
+- `-Dpayload-dir=none` builds failed to compile (`error.AccessDenied` was not in the inferred error
+  set of `payload.resolve`); the hint now compares `@errorName`.
+- README: release-asset choice (gnu vs musl) and a troubleshooting table.
+
 ## [0.1.0] — 2025-11-03
 
 First public release. `reclipz` is a Zig re-implementation of

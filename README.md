@@ -202,6 +202,19 @@ churn) is in [`docs/RESEARCH.md`](docs/RESEARCH.md); the architecture, API contr
 in [`docs/PLAN.md`](docs/PLAN.md). Every number was measured; probes live in
 [`docs/experiments/`](docs/experiments/).
 
+## Troubleshooting
+
+| Symptom | Cause / fix |
+| --- | --- |
+| `the embedded engine cannot be started: FileNotFound` at startup | Wrong release flavour: the **musl** build's engine needs `/lib/ld-musl-*.so.1`, which glibc hosts do not have. Download the `-gnu` asset (or, on Alpine, the `-musl` one). |
+| `AccessDenied` / engine cannot run | The cache dir is on a `noexec` mount or not writable: set `RECLIPZ_CACHE_DIR` to an exec-capable directory. |
+| UI says `Engine failed to start (…)` | The server's engine probe passed at startup but a job failed to spawn it; run `reclipz selftest` and check the server log. |
+| A site stopped working | `reclipz update` (the engine is upstream yt-dlp; site fixes come from there). |
+| `reclipz update` cannot reach GitHub | Check `HTTPS_PROXY`/`RECLIPZ_PROXY`, or set `RECLIPZ_YTDLP` to a local build. |
+
+`reclipz selftest` checks the whole chain (engine execution, yt-dlp version, ffmpeg) in about a
+second and prints the same hints.
+
 ## Changelog
 
 See [`CHANGELOG.md`](CHANGELOG.md) (release notes for each version are in

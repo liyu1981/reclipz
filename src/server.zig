@@ -208,7 +208,7 @@ fn infoRoute(app: *App, a: std.mem.Allocator, req: *std.http.Server.Request, bod
 
     const argv = try engine.infoArgv(a, app.cfg, app.paths, url);
     const res = engine.run(app.io, a, app.cfg, argv) catch |e| {
-        const msg = try std.fmt.allocPrint(a, "Engine failed to start: {s}", .{@errorName(e)});
+        const msg = try std.fmt.allocPrint(a, "Engine failed to start ({s}) — run `reclipz selftest`", .{@errorName(e)});
         return jsonError(a, req, .bad_request, msg);
     };
     if (res.timed_out) return jsonError(a, req, .bad_request, "Timed out fetching video info");
@@ -238,7 +238,7 @@ fn playlistRoute(app: *App, a: std.mem.Allocator, req: *std.http.Server.Request,
 
     const argv = try engine.playlistArgv(a, app.cfg, app.paths, url);
     const res = engine.run(app.io, a, app.cfg, argv) catch |e| {
-        const msg = try std.fmt.allocPrint(a, "Engine failed to start: {s}", .{@errorName(e)});
+        const msg = try std.fmt.allocPrint(a, "Engine failed to start ({s}) — run `reclipz selftest`", .{@errorName(e)});
         return jsonError(a, req, .bad_request, msg);
     };
     if (res.timed_out) return jsonError(a, req, .bad_request, "Timed out fetching playlist info");

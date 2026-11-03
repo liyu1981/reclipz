@@ -130,6 +130,7 @@ fn runServe(
     };
     var mutable_paths = paths;
     cfg.child_env = try buildChildEnv(runtime, io, env.*, cfg, &mutable_paths);
+    try verifyEngine(io, runtime, env.*, cfg, &mutable_paths);
 
     var registry = try jobs.Registry.init(runtime, io, cfg, &mutable_paths);
 
@@ -144,6 +145,56 @@ fn runServe(
         .registry = &registry,
     };
     try server.serve(&app);
+}
+
+/// Fail fast with an actionable message when the embedded engine cannot actually execute
+/// (the classic case: the musl release on a glibc host, or a noexec cache dir).
+fn verifyEngine(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    env: std.process.Environ.Map,
+    cfg: *const config.Config,
+    paths: *const payload.Paths,
+) !void {
+    if (env.get("RECLIPZ_SKIP_ENGINE_CHECK")) |v| {
+        if (v.len != 0 and !std.mem.eql(u8, v, "0")) return;
+    }
+    const tmp = try payload.tmpPath(gpa, io, cfg);
+    const res = proc.run(io, gpa, &.{ paths.ytdlp, "--version" }, .{
+        .timeout_ms = 60_000,
+        .tmp_dir = tmp,
+        .env_map = cfg.child_env,
+    }) catch |e| {
+        const name = @errorName(e);
+        log.err("the embedded engine cannot be started: {s}", .{name});
+        engineHint(name, cfg);
+        std.process.exit(1);
+    };
+    if (!res.ok()) {
+        log.err("the embedded engine failed its startup check: {s}", .{res.lastStderrLine()});
+        engineHint(@errorName(error.EngineFailed), cfg);
+        std.process.exit(1);
+    }
+    log.info("engine ok: yt-dlp {s}", .{std.mem.trim(u8, res.stdout, " \t\r\n")});
+}
+
+fn engineHint(err_name: []const u8, cfg: *const config.Config) void {
+    const builtin = @import("builtin");
+    if (std.mem.eql(u8, err_name, "FileNotFound")) {
+        if (builtin.abi.isMusl()) {
+            log.err("this is the MUSL build: its engine needs /lib/ld-musl-{s}.so.1, which this host does not provide", .{@tagName(builtin.cpu.arch)});
+            log.err("on glibc systems (Ubuntu/Debian/Fedora/Arch/...) use the -gnu release instead;", .{});
+            log.err("the -musl release is for Alpine and other musl distributions", .{});
+        } else {
+            log.err("the engine binary is missing or its ELF interpreter is unavailable", .{});
+            log.err("try `reclipz selftest`, or set RECLIPZ_ENGINE=system / RECLIPZ_YTDLP=<path>", .{});
+        }
+    } else if (std.mem.eql(u8, err_name, "AccessDenied")) {
+        log.err("the cache dir '{s}' is not executable (noexec mount or file permissions)", .{cfg.cache_dir});
+        log.err("set RECLIPZ_CACHE_DIR to a directory on an exec-capable filesystem", .{});
+    } else {
+        log.err("try `reclipz selftest` for details, or set RECLIPZ_ENGINE=system / RECLIPZ_YTDLP=<path>", .{});
+    }
 }
 
 /// The engine gets its own environment: TMPDIR in our cache (PyInstaller unpacks there) and a PATH
@@ -257,7 +308,12 @@ fn runPassthrough(
     for (rest) |a| try argv.append(scratch, a);
 
     const child_env = try buildChildEnv(scratch, io, env.*, cfg, &paths);
-    const code = try proc.passthrough(io, argv.items, child_env);
+    const code = proc.passthrough(io, argv.items, child_env) catch |e| {
+        const name = @errorName(e);
+        log.err("cannot execute {s}: {s}", .{ bin, name });
+        engineHint(name, cfg);
+        std.process.exit(1);
+    };
     std.process.exit(code);
 }
 
@@ -363,6 +419,7 @@ fn runSelftest(
 
     const yt = engineRun(io, scratch, cfg, &.{ paths.ytdlp, "--version" }) catch |e| {
         std.debug.print("  [FAIL] yt-dlp did not run: {s}\n", .{@errorName(e)});
+        engineHint(@errorName(e), cfg);
         std.process.exit(1);
     };
     if (yt.ok()) {
