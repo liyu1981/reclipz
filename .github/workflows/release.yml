@@ -88,4 +88,5 @@ jobs:
         with:
           files: |
             artifacts/reclipz-*
+            artifacts/LICENSE-*
             artifacts/SHA2-256SUMS
