@@ -1,7 +1,8 @@
+.dev/
 .zig-cache/
-zig-out/
-payload/
-payload-*/
 dist/
-out/
 downloads/
+out/
+payload-*/
+payload/
+zig-out/

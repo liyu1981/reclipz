@@ -1,6 +1,16 @@
 const std = @import("std");
 const log = @import("log.zig");
 
+/// `HOST=auto` (and similar placeholders) appear in some CI/shell environments; Flask would reject
+/// them too. Treat the obvious "bind locally" values as 127.0.0.1, and "any"/"*"/"all" as 0.0.0.0.
+pub fn normalizeHost(v: []const u8) ?[]const u8 {
+    const t = std.mem.trim(u8, v, " \t");
+    if (t.len == 0) return null;
+    if (std.mem.eql(u8, t, "auto") or std.mem.eql(u8, t, "localhost")) return "127.0.0.1";
+    if (std.mem.eql(u8, t, "any") or std.mem.eql(u8, t, "*") or std.mem.eql(u8, t, "all")) return "0.0.0.0";
+    return t;
+}
+
 pub const EngineMode = enum {
     embedded,
     system,
@@ -37,14 +47,7 @@ pub const Config = struct {
         var cfg: Config = .{};
 
         if (env.get("HOST")) |v| {
-            // `HOST=auto` (and friends) show up in some CI/shell environments; Flask would reject
-            // them too. Normalize the values that obviously mean "bind locally".
-            const norm = std.mem.trim(u8, v, " \t");
-            if (std.mem.eql(u8, norm, "auto") or std.mem.eql(u8, norm, "localhost")) {
-                cfg.host = "127.0.0.1";
-            } else if (norm.len != 0) {
-                cfg.host = try gpa.dupe(u8, norm);
-            }
+            if (normalizeHost(v)) |h| cfg.host = try gpa.dupe(u8, h);
         }
         if (env.get("PORT")) |v| cfg.port = std.fmt.parseInt(u16, v, 10) catch cfg.port;
         if (env.get("RECLIPZ_DOWNLOAD_DIR")) |v| cfg.download_dir = try gpa.dupe(u8, v);

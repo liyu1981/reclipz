@@ -169,6 +169,18 @@ needed). CI (`.github/workflows/release.yml`) builds all four targets and publis
 ## Development
 
 ```bash
+tools/dev.sh                    # build (Debug) + run on 127.0.0.1:8899, using ./.dev/{cache,downloads}
+tools/dev.sh --fixture          # also serve tests/fixtures; paste the printed URL into the UI
+tools/dev.sh --release --log debug --reset
+tools/dev.sh --port 9000 --no-build
+```
+
+The dev server keeps its engine cache and downloads in `./.dev/`, so it never touches your real
+`~/.cache/reclipz` or `~/Downloads`. Ctrl-C stops it (and the `--fixture` server) cleanly.
+If `payload/` is missing it falls back to a system `yt-dlp`, or run it with `--fetch` to download the
+official engine automatically.
+
+```bash
 zig build test                  # unit tests (JSON mapping, progress, unit file, checksums, ...)
 zig build -Doptimize=ReleaseSafe
 tests/e2e.sh                    # end-to-end: UI, info, MP4, MP3, concurrency, progress, cancel, shutdown

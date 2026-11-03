@@ -232,7 +232,7 @@ fn parseServeFlags(gpa: std.mem.Allocator, args: []const []const u8, cfg: *confi
         } else if (std.mem.eql(u8, a, "--host")) {
             i += 1;
             if (i >= args.len) return "missing value for --host";
-            cfg.host = try gpa.dupe(u8, args[i]);
+            cfg.host = try gpa.dupe(u8, config.normalizeHost(args[i]) orelse return "invalid --host");
         } else if (std.mem.eql(u8, a, "--download-dir")) {
             i += 1;
             if (i >= args.len) return "missing value for --download-dir";
