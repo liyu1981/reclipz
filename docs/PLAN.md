@@ -43,7 +43,7 @@ it can be added as an *optional* third engine without changing anything else.
 | **M1** payload layer, process layer, real engine, download+merge+MP3 | **done** |
 | **M2** `reclipz update`, live progress, cancellation, graceful shutdown, `install-service` | **done** |
 | **M3** linux release matrix (x86_64/aarch64 × gnu/musl), Docker image, CI release workflow | **done** |
-| **M4** hardening: unit + e2e suites, fuzz-ish inputs, orphan-process checks | **done (core)**; nightly real-network suite still to add |
+| **M4** hardening: unit + e2e suites, fuzz-ish inputs, orphan-process checks, nightly network suite | **done** |
 
 Verified end-to-end (`tests/e2e.sh`, 12 checks) on Linux x86_64 with the official `yt-dlp_linux`
 2026.10.26 payload and a minimal LGPL ffmpeg 7.1 build:

@@ -1,0 +1,29 @@
+name: nightly
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  network:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+
+      # Build without embedding payloads, then let reclipz bootstrap the engine via its own
+      # update channel — this also exercises `reclipz update` against the live release.
+      - name: Build (engine-less)
+        run: zig build -Dpayload-dir=none -Doptimize=ReleaseSafe
+
+      - name: Bootstrap engine
+        run: ./zig-out/bin/reclipz update
+
+      - name: Engine selftest
+        run: ./zig-out/bin/reclipz selftest
+
+      - name: Real-network smoke test
+        run: tests/network.sh
