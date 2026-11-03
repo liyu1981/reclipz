@@ -135,6 +135,33 @@ Caddy equivalent: `clip.example.com { reverse_proxy 127.0.0.1:8899 }`.
 Keep `HOST=127.0.0.1` when a proxy runs on the same host; use `HOST=0.0.0.0` only inside a container
 network you control.
 
+## Disk usage and cleanup
+
+| Path | What | Cleaned by |
+| --- | --- | --- |
+| `<cache>/bin/yt-dlp/<version>/yt-dlp` | active engine (+ the embedded build) | obsolete versions pruned at startup and by `reclipz cache clean --engines` |
+| `<cache>/bin/ffmpeg/<hash>/` | static ffmpeg + ffprobe | old hashes pruned the same way |
+| `<cache>/tmp/` | PyInstaller extraction dirs, process capture files | entries older than `RECLIPZ_TMP_TTL` (default 3600 s) removed at startup and every 60 s; `cache clean --tmp` to force |
+| `<cache>/yt-dlp/` | yt-dlp's own cache | managed by yt-dlp |
+| `<downloads>/<job>.<ext>` | finished downloads | deleted when the job expires: `RECLIPZ_JOB_TTL` seconds (default **24 h**; `0` = keep forever, i.e. upstream ReClip behaviour) |
+| `<downloads>/.tmp/<job>/` | partial files | deleted immediately on success, failure or cancel (`RECLIPZ_KEEP_PARTIAL=1` keeps them for debugging) |
+
+```bash
+reclipz cache info                 # sizes of engines, temp, downloads
+reclipz cache info --json          # scriptable
+reclipz cache clean                # stale temp entries (safe default)
+reclipz cache clean --engines      # drop engine versions other than the active one
+reclipz cache clean --downloads    # delete finished downloads (destructive)
+reclipz cache clean --all --dry-run
+```
+
+Typical footprint: **~47 MB engine cache** (41 MB yt-dlp + 6 MB ffmpeg, one-time), plus each
+download stored once. If you want the upstream ReClip behaviour (files never deleted), set
+`RECLIPZ_JOB_TTL=0` and manage the directory yourself.
+
+> Don't point two different reclipz versions at the same `RECLIPZ_CACHE_DIR`: startup maintenance
+> prunes engine versions that the running build does not use.
+
 ## Configuration
 
 | Variable | Default | |

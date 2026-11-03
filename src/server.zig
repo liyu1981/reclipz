@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const assets = @import("assets.zig");
+const cache = @import("cache.zig");
 const config = @import("config.zig");
 const engine = @import("engine.zig");
 const fsutil = @import("fsutil.zig");
@@ -398,8 +399,9 @@ fn asciiFallback(gpa: std.mem.Allocator, name: []const u8) ![]const u8 {
 
 fn sweepLoop(app: *App) void {
     while (true) {
-        app.io.sleep(.fromSeconds(300), .awake) catch {};
+        app.io.sleep(.fromSeconds(60), .awake) catch {};
         app.registry.sweep();
+        _ = cache.cleanTmp(app.io, app.gpa, app.cfg, false);
     }
 }
 

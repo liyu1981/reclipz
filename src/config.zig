@@ -31,6 +31,11 @@ pub const Config = struct {
     max_concurrent: usize = 3,
     job_timeout_ms: u64 = 300_000,
     job_ttl_s: u64 = 24 * 3600,
+    /// Stale temp entries (engine extraction dirs, capture files) are removed after this many
+    /// seconds; 0 disables the sweep.
+    tmp_ttl_s: u64 = 3600,
+    /// Keep partial files of failed/cancelled jobs instead of deleting the job temp dir.
+    keep_partial: bool = false,
     engine: EngineMode = .embedded,
     ytdlp_override: ?[]const u8 = null,
     ffmpeg_override: ?[]const u8 = null,
@@ -54,6 +59,10 @@ pub const Config = struct {
         if (env.get("RECLIPZ_MAX_CONCURRENT")) |v| cfg.max_concurrent = std.fmt.parseInt(usize, v, 10) catch cfg.max_concurrent;
         if (env.get("RECLIPZ_JOB_TIMEOUT")) |v| cfg.job_timeout_ms = 1000 * (std.fmt.parseInt(u64, v, 10) catch 300);
         if (env.get("RECLIPZ_JOB_TTL")) |v| cfg.job_ttl_s = std.fmt.parseInt(u64, v, 10) catch cfg.job_ttl_s;
+        if (env.get("RECLIPZ_TMP_TTL")) |v| cfg.tmp_ttl_s = std.fmt.parseInt(u64, v, 10) catch cfg.tmp_ttl_s;
+        if (env.get("RECLIPZ_KEEP_PARTIAL")) |v| {
+            cfg.keep_partial = !(v.len == 0 or std.mem.eql(u8, v, "0") or std.mem.eql(u8, v, "false"));
+        }
         if (env.get("RECLIPZ_ENGINE")) |v| cfg.engine = EngineMode.parse(v);
         if (env.get("RECLIPZ_YTDLP")) |v| cfg.ytdlp_override = try gpa.dupe(u8, v);
         if (env.get("RECLIPZ_FFMPEG")) |v| cfg.ffmpeg_override = try gpa.dupe(u8, v);

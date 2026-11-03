@@ -1,4 +1,5 @@
 const std = @import("std");
+const cache = @import("cache.zig");
 const config = @import("config.zig");
 const fsutil = @import("fsutil.zig");
 const jobs = @import("jobs.zig");
@@ -23,6 +24,7 @@ const usage =
     \\  reclipz ffmpeg <args...>       Run the embedded ffmpeg
     \\  reclipz ffprobe <args...>      Run the embedded ffprobe
     \\  reclipz update [--check]       Update the embedded yt-dlp payload (no rebuild)
+    \\  reclipz cache info|clean       Inspect / clean the engine cache and downloads
     \\  reclipz install-service        Install as a user-space systemd service
     \\  reclipz uninstall-service      Remove the systemd service
     \\  reclipz service-status         Show the systemd service status
@@ -82,6 +84,7 @@ pub fn main(init: std.process.Init) !void {
         return runVersion(io, sa, env, &cfg);
     }
     if (std.mem.eql(u8, cmd, "update")) return runUpdate(io, sa, env, &cfg, rest);
+    if (std.mem.eql(u8, cmd, "cache")) return cache.run(io, sa, &cfg, rest);
     if (std.mem.eql(u8, cmd, "install-service")) return runInstallService(io, sa, gpa, env, &cfg, rest);
     if (std.mem.eql(u8, cmd, "uninstall-service")) return service.uninstall(io, sa, env.*);
     if (std.mem.eql(u8, cmd, "service-status")) return service.status(io);
@@ -130,6 +133,7 @@ fn runServe(
     };
     var mutable_paths = paths;
     cfg.child_env = try buildChildEnv(runtime, io, env.*, cfg, &mutable_paths);
+    cache.startupMaintenance(io, runtime, cfg);
     try verifyEngine(io, runtime, env.*, cfg, &mutable_paths);
 
     var registry = try jobs.Registry.init(runtime, io, cfg, &mutable_paths);

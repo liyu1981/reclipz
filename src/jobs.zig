@@ -221,6 +221,9 @@ fn download(reg: *Registry, ctx: *Ctx) !void {
 
     const job_dir = try std.fmt.allocPrint(gpa, "{s}/.tmp/{s}", .{ cfg.download_dir, job.id });
     try fsutil.ensureDir(io, job_dir);
+    // Partial files are never user data: drop the whole job dir on success *and* on failure,
+    // unless RECLIPZ_KEEP_PARTIAL is set for debugging.
+    defer if (!cfg.keep_partial) std.Io.Dir.cwd().deleteTree(io, job_dir) catch {};
     const template = try std.fmt.allocPrint(gpa, "{s}/{s}.%(ext)s", .{ job_dir, job.id });
 
     const argv = try engine.downloadArgv(gpa, cfg, reg.paths, job.url, ctx.choice, ctx.format_id, template);
@@ -261,7 +264,6 @@ fn download(reg: *Registry, ctx: *Ctx) !void {
         reg.setError(job, try std.fmt.allocPrint(gpa, "Could not finalize file: {s}", .{@errorName(e)}));
         return;
     };
-    std.Io.Dir.cwd().deleteTree(io, job_dir) catch {};
 
     const safe = try engine.sanitizeFilename(gpa, job.title);
     const filename = if (safe.len != 0)

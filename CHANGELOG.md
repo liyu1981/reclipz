@@ -6,6 +6,16 @@ All notable changes to reclipz are documented here. The format is loosely based 
 
 ## [Unreleased]
 
+### Added
+
+- `reclipz cache info [--json]` and `reclipz cache clean [--tmp|--engines|--downloads|--all]
+  [--dry-run]` to inspect and reclaim disk space (engine versions, leaked temp entries,
+  finished downloads).
+- `RECLIPZ_TMP_TTL` (default 3600 s; `0` disables) and `RECLIPZ_KEEP_PARTIAL` for controlling
+  temp-file cleanup; stale temp entries are swept at startup and every 60 s.
+- Obsolete yt-dlp/ffmpeg payload versions are pruned at startup, not only after `reclipz update`.
+- README: "Disk usage and cleanup" section documenting where bytes go and what deletes them.
+
 ### Fixed
 
 - Fail fast with an actionable message when the embedded engine cannot execute (for example the
@@ -14,6 +24,8 @@ All notable changes to reclipz are documented here. The format is loosely based 
   same hints. The API error is now `Engine failed to start (…) — run `reclipz selftest``.
 - `-Dpayload-dir=none` builds failed to compile (`error.AccessDenied` was not in the inferred error
   set of `payload.resolve`); the hint now compares `@errorName`.
+- Partial files of failed/cancelled/timed-out jobs are deleted (`downloads/.tmp/<job>/`); previously
+  they were left behind.
 - README: release-asset choice (gnu vs musl) and a troubleshooting table.
 
 ## [0.1.0] — 2025-11-03
