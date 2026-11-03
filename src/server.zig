@@ -1,7 +1,6 @@
-//! HTTP server: serves the (byte-identical) reclip UI and the 7 API endpoints.
+//! HTTP server: serves the (byte-identical) reclip UI and the API endpoints.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const assets = @import("assets.zig");
 const config = @import("config.zig");
 const engine = @import("engine.zig");
@@ -28,7 +27,6 @@ pub fn serve(app: *App) !void {
     log.info("listening on http://{s}:{d}", .{ app.cfg.host, app.cfg.port });
     log.info("engine: yt-dlp {s} ({s}) at {s}", .{ app.paths.version, @tagName(app.paths.source), app.paths.ytdlp });
 
-    // Periodic job sweep (TTL).
     const sweeper = std.Thread.spawn(.{}, sweepLoop, .{app}) catch |e| blk: {
         log.warn("could not start TTL sweeper: {s}", .{@errorName(e)});
         break :blk null;
@@ -91,9 +89,23 @@ fn handleConnection(app: *App, stream: std.Io.net.Stream) !void {
 }
 
 fn route(app: *App, req: *std.http.Server.Request) !void {
+    var arena = std.heap.ArenaAllocator.init(app.gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
     const target = req.head.target;
     const path = if (std.mem.indexOfScalar(u8, target, '?')) |i| target[0..i] else target;
     const method = req.head.method;
+
+    // Always consume the request body before responding: std's server asserts that a request with
+    // a body has been read/discarded before the connection can be reused.
+    var body: []const u8 = "";
+    if (method.requestHasBody()) {
+        body = readRequestBody(a, req) catch |e| switch (e) {
+            error.BodyTooLarge => return jsonError(a, req, .payload_too_large, "Request too large"),
+            else => return jsonError(a, req, .bad_request, "Invalid request body"),
+        };
+    }
 
     if (method == .GET or method == .HEAD) {
         if (std.mem.eql(u8, path, "/")) {
@@ -103,23 +115,49 @@ fn route(app: *App, req: *std.http.Server.Request) !void {
             return respondStatic(req, "image/svg+xml", assets.favicon_svg);
         }
         if (std.mem.startsWith(u8, path, "/api/status/")) {
-            return statusRoute(app, req, path["/api/status/".len..]);
+            return statusRoute(app, a, req, path["/api/status/".len..]);
         }
         if (std.mem.startsWith(u8, path, "/api/file/")) {
-            return fileRoute(app, req, path["/api/file/".len..]);
+            return fileRoute(app, a, req, path["/api/file/".len..]);
+        }
+        if (std.mem.startsWith(u8, path, "/api/cancel/")) {
+            return cancelRoute(app, a, req, path["/api/cancel/".len..]);
         }
     } else if (method == .POST) {
-        if (std.mem.eql(u8, path, "/api/info")) return infoRoute(app, req);
-        if (std.mem.eql(u8, path, "/api/playlist")) return playlistRoute(app, req);
-        if (std.mem.eql(u8, path, "/api/download")) return downloadRoute(app, req);
+        if (std.mem.eql(u8, path, "/api/info")) return infoRoute(app, a, req, body);
+        if (std.mem.eql(u8, path, "/api/playlist")) return playlistRoute(app, a, req, body);
+        if (std.mem.eql(u8, path, "/api/download")) return downloadRoute(app, a, req, body);
+        if (std.mem.startsWith(u8, path, "/api/cancel/")) {
+            return cancelRoute(app, a, req, path["/api/cancel/".len..]);
+        }
     }
 
-    return respondJson(req, .not_found, "{\"error\":\"Not found\"}");
+    return jsonError(a, req, .not_found, "Not found");
 }
 
 // ---------------------------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------------------------
+
+fn readRequestBody(a: std.mem.Allocator, req: *std.http.Server.Request) ![]const u8 {
+    const content_length = req.head.content_length;
+    const chunked = req.head.transfer_encoding != .none;
+    const has_body = chunked or (content_length orelse 0) > 0;
+    if (content_length) |len| {
+        if (len > max_body) return error.BodyTooLarge;
+    }
+
+    var transfer_buf: [8 * 1024]u8 = undefined;
+    const reader = if (req.head.expect != null)
+        try req.readerExpectContinue(&transfer_buf)
+    else
+        req.readerExpectNone(&transfer_buf);
+
+    if (!has_body) return "";
+
+    const limit: std.Io.Limit = if (content_length) |len| .limited(len) else .limited(max_body);
+    return reader.allocRemaining(a, limit);
+}
 
 fn respondStatic(req: *std.http.Server.Request, content_type: []const u8, body: []const u8) !void {
     try req.respond(body, .{ .extra_headers = &.{
@@ -142,35 +180,30 @@ fn jsonError(allocator: std.mem.Allocator, req: *std.http.Server.Request, status
     return respondJson(req, status, out.written());
 }
 
-fn readBody(allocator: std.mem.Allocator, req: *std.http.Server.Request) ![]u8 {
-    const len = req.head.content_length orelse 0;
-    if (len > max_body) return error.BodyTooLarge;
-    var buf: [4096]u8 = undefined;
-    const reader = req.readerExpectNone(&buf);
-    return reader.allocRemaining(allocator, .limited(if (len == 0) max_body else len));
+const UrlBody = struct { url: []const u8 = "" };
+
+const DownloadBody = struct {
+    url: []const u8 = "",
+    format: []const u8 = "video",
+    format_id: ?[]const u8 = null,
+    title: []const u8 = "",
+};
+
+fn parseBody(comptime T: type, a: std.mem.Allocator, body: []const u8) !T {
+    if (body.len == 0) return .{};
+    const parsed = try std.json.parseFromSlice(T, a, body, .{ .ignore_unknown_fields = true });
+    return parsed.value;
 }
 
 // ---------------------------------------------------------------------------------------------
 // /api/info
 // ---------------------------------------------------------------------------------------------
 
-fn infoRoute(app: *App, req: *std.http.Server.Request) !void {
-    var arena = std.heap.ArenaAllocator.init(app.gpa);
-    defer arena.deinit();
-    const a = arena.allocator();
-
-    const body = readBody(a, req) catch |e| switch (e) {
-        error.BodyTooLarge => return jsonError(a, req, .payload_too_large, "Request too large"),
-        else => return e,
-    };
-    const parsed = std.json.parseFromSlice(struct { url: []const u8 = "" }, a, body, .{
-        .ignore_unknown_fields = true,
-    }) catch {
+fn infoRoute(app: *App, a: std.mem.Allocator, req: *std.http.Server.Request, body: []const u8) !void {
+    const parsed = parseBody(UrlBody, a, body) catch {
         return jsonError(a, req, .bad_request, "Invalid JSON body");
     };
-    defer parsed.deinit();
-
-    const url = std.mem.trim(u8, parsed.value.url, " \t\r\n");
+    const url = std.mem.trim(u8, parsed.url, " \t\r\n");
     if (url.len == 0) return jsonError(a, req, .bad_request, "No URL provided");
 
     const argv = try engine.infoArgv(a, app.cfg, app.paths, url);
@@ -196,23 +229,11 @@ fn infoRoute(app: *App, req: *std.http.Server.Request) !void {
 // /api/playlist
 // ---------------------------------------------------------------------------------------------
 
-fn playlistRoute(app: *App, req: *std.http.Server.Request) !void {
-    var arena = std.heap.ArenaAllocator.init(app.gpa);
-    defer arena.deinit();
-    const a = arena.allocator();
-
-    const body = readBody(a, req) catch |e| switch (e) {
-        error.BodyTooLarge => return jsonError(a, req, .payload_too_large, "Request too large"),
-        else => return e,
-    };
-    const parsed = std.json.parseFromSlice(struct { url: []const u8 = "" }, a, body, .{
-        .ignore_unknown_fields = true,
-    }) catch {
+fn playlistRoute(app: *App, a: std.mem.Allocator, req: *std.http.Server.Request, body: []const u8) !void {
+    const parsed = parseBody(UrlBody, a, body) catch {
         return jsonError(a, req, .bad_request, "Invalid JSON body");
     };
-    defer parsed.deinit();
-
-    const url = std.mem.trim(u8, parsed.value.url, " \t\r\n");
+    const url = std.mem.trim(u8, parsed.url, " \t\r\n");
     if (url.len == 0) return jsonError(a, req, .bad_request, "No URL provided");
 
     const argv = try engine.playlistArgv(a, app.cfg, app.paths, url);
@@ -238,29 +259,14 @@ fn playlistRoute(app: *App, req: *std.http.Server.Request) !void {
 // /api/download
 // ---------------------------------------------------------------------------------------------
 
-fn downloadRoute(app: *App, req: *std.http.Server.Request) !void {
-    var arena = std.heap.ArenaAllocator.init(app.gpa);
-    defer arena.deinit();
-    const a = arena.allocator();
-
-    const body = readBody(a, req) catch |e| switch (e) {
-        error.BodyTooLarge => return jsonError(a, req, .payload_too_large, "Request too large"),
-        else => return e,
-    };
-    const parsed = std.json.parseFromSlice(struct {
-        url: []const u8 = "",
-        format: []const u8 = "video",
-        format_id: ?[]const u8 = null,
-        title: []const u8 = "",
-    }, a, body, .{ .ignore_unknown_fields = true }) catch {
+fn downloadRoute(app: *App, a: std.mem.Allocator, req: *std.http.Server.Request, body: []const u8) !void {
+    const parsed = parseBody(DownloadBody, a, body) catch {
         return jsonError(a, req, .bad_request, "Invalid JSON body");
     };
-    defer parsed.deinit();
 
-    const url = std.mem.trim(u8, parsed.value.url, " \t\r\n");
+    const url = std.mem.trim(u8, parsed.url, " \t\r\n");
     if (url.len == 0) return jsonError(a, req, .bad_request, "No URL provided");
-    // Reject argument-injection shaped values (format ids are passed to the engine).
-    if (parsed.value.format_id) |fid| {
+    if (parsed.format_id) |fid| {
         if (fid.len > 128 or std.mem.startsWith(u8, fid, "-") or std.mem.indexOfAny(u8, fid, " \t\r\n") != null) {
             return jsonError(a, req, .bad_request, "Invalid format_id");
         }
@@ -268,9 +274,9 @@ fn downloadRoute(app: *App, req: *std.http.Server.Request) !void {
 
     const job_id = app.registry.start(
         url,
-        engine.FormatChoice.parse(parsed.value.format),
-        parsed.value.format_id,
-        parsed.value.title,
+        engine.FormatChoice.parse(parsed.format),
+        parsed.format_id,
+        parsed.title,
     ) catch |e| {
         const msg = try std.fmt.allocPrint(a, "Could not start download: {s}", .{@errorName(e)});
         return jsonError(a, req, .bad_request, msg);
@@ -283,22 +289,40 @@ fn downloadRoute(app: *App, req: *std.http.Server.Request) !void {
 }
 
 // ---------------------------------------------------------------------------------------------
-// /api/status/<id> and /api/file/<id>
+// /api/status/<id>, /api/cancel/<id>, /api/file/<id>
 // ---------------------------------------------------------------------------------------------
+
+const ProgressResponse = struct {
+    downloaded_bytes: ?u64 = null,
+    total_bytes: ?u64 = null,
+    speed: ?f64 = null,
+    eta: ?u64 = null,
+    percent: ?f64 = null,
+    fragment_index: ?u64 = null,
+    fragment_count: ?u64 = null,
+};
 
 const StatusResponse = struct {
     status: []const u8,
     @"error": ?[]const u8,
     filename: ?[]const u8,
+    progress: ?ProgressResponse = null,
 };
 
-fn statusRoute(app: *App, req: *std.http.Server.Request, job_id: []const u8) !void {
-    var arena = std.heap.ArenaAllocator.init(app.gpa);
-    defer arena.deinit();
-    const a = arena.allocator();
+fn statusRoute(app: *App, a: std.mem.Allocator, req: *std.http.Server.Request, job_id: []const u8) !void {
     if (!validJobId(job_id)) return jsonError(a, req, .not_found, "Job not found");
     const job = (try app.registry.snapshot(a, job_id)) orelse
         return jsonError(a, req, .not_found, "Job not found");
+
+    const progress: ?ProgressResponse = if (job.progress.isEmpty()) null else .{
+        .downloaded_bytes = job.progress.downloaded_bytes,
+        .total_bytes = job.progress.total_bytes,
+        .speed = job.progress.speed,
+        .eta = job.progress.eta,
+        .percent = job.progress.percent(),
+        .fragment_index = job.progress.fragment_index,
+        .fragment_count = job.progress.fragment_count,
+    };
 
     var out = std.Io.Writer.Allocating.init(a);
     defer out.deinit();
@@ -306,14 +330,18 @@ fn statusRoute(app: *App, req: *std.http.Server.Request, job_id: []const u8) !vo
         .status = job.status.asApiString(),
         .@"error" = job.err,
         .filename = job.filename,
+        .progress = progress,
     }, .{}, &out.writer);
     try respondJson(req, .ok, out.written());
 }
 
-fn fileRoute(app: *App, req: *std.http.Server.Request, job_id: []const u8) !void {
-    var arena = std.heap.ArenaAllocator.init(app.gpa);
-    defer arena.deinit();
-    const a = arena.allocator();
+fn cancelRoute(app: *App, a: std.mem.Allocator, req: *std.http.Server.Request, job_id: []const u8) !void {
+    if (!validJobId(job_id)) return jsonError(a, req, .not_found, "Job not found");
+    if (!app.registry.cancel(job_id)) return jsonError(a, req, .not_found, "Job not found");
+    try respondJson(req, .ok, "{\"status\":\"cancelling\"}");
+}
+
+fn fileRoute(app: *App, a: std.mem.Allocator, req: *std.http.Server.Request, job_id: []const u8) !void {
     if (!validJobId(job_id)) return jsonError(a, req, .not_found, "File not ready");
     const job = (try app.registry.snapshot(a, job_id)) orelse
         return jsonError(a, req, .not_found, "File not ready");

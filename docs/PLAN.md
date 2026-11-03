@@ -39,23 +39,29 @@ it can be added as an *optional* third engine without changing anything else.
 
 | Milestone | State |
 | --- | --- |
-| **M0** skeleton, UI, API, jobs (stub) | **done** |
-| **M1** payload layer, process layer, real engine, download+merge+MP3 | **done** (prototype) |
-| **M2** update channel, progress superset, concurrency/cancel polish | not started |
-| **M3** release matrix (musl/aarch64/macOS/Windows), CI, docker | not started |
-| **M4** hardening (fuzz, Playwright E2E, nightly network suite) | not started |
+| **M0** skeleton, UI, API, jobs | **done** |
+| **M1** payload layer, process layer, real engine, download+merge+MP3 | **done** |
+| **M2** `reclipz update`, live progress, cancellation, graceful shutdown, `install-service` | **done** |
+| **M3** linux release matrix (x86_64/aarch64 × gnu/musl), Docker image, CI release workflow | **done** |
+| **M4** hardening: unit + e2e suites, fuzz-ish inputs, orphan-process checks | **done (core)**; nightly real-network suite still to add |
 
-Verified on Linux x86_64 with the official `yt-dlp_linux` 2026.10.26 payload and a minimal LGPL
-ffmpeg 7.1 build:
+Verified end-to-end (`tests/e2e.sh`, 12 checks) on Linux x86_64 with the official `yt-dlp_linux`
+2026.10.26 payload and a minimal LGPL ffmpeg 7.1 build:
 
-- `reclipz` 48 MB stripped; cache extraction 46 MB once; `selftest` ~1 s warm.
 - `GET /` is byte-identical to upstream `templates/index.html` (21,419 B).
-- `/api/info` → real yt-dlp JSON mapping (`{"title":"sample",...}`).
-- `/api/download` video → MP4 (h264+aac); audio → MP3 (verified with ffprobe).
-- `/api/status` / `/api/file` → upstream contract, `Content-Disposition` with RFC 5987 filename.
-- error parity: `{"error":"ERROR: [generic] … HTTP Error 404: Not Found …"}` → the UI's
-  `friendlyError()` mapping fires.
-- `reclipz yt-dlp --version` / `reclipz ffmpeg -version` pass through to the embedded binaries.
+- `/api/info` → yt-dlp JSON mapping; errors keep upstream's last-stderr-line contract
+  (`HTTP Error 404` → the UI's `friendlyError()` mapping fires).
+- video job → MP4 (h264+aac); audio job → MP3 (both verified with ffprobe).
+- `/api/status` exposes live `progress`; `/api/cancel/<id>` stops the job and kills the engine group.
+- SIGTERM → exit 0, engine process groups killed (no orphan yt-dlp/ffmpeg).
+- `reclipz update` downloads the official asset, verifies SHA2-256SUMS, installs it into a versioned
+  cache dir and repoints `engine.json` (measured: 2.5 s for 41 MB on a warm connection).
+- `reclipz install-service --dry-run` renders a hardened user unit.
+- Cross builds validated: `aarch64-linux-musl` (payload `yt-dlp_musllinux_aarch64` + zig-cc-built
+  ffmpeg/ffprobe) produces a 57 MB aarch64 ELF.
+
+Sizes: x86_64 release 52.6 MB unstripped / **49.0 MB stripped**; no-payload build 5.4 MB;
+one-time cache ~47 MB.
 
 ---
 
@@ -242,7 +248,9 @@ supported but not mandatory; `--allow-unverified` is required for hash-less sour
 | `reclipz [serve] [--port N] [--host H]` | start the web app (default command) |
 | `reclipz yt-dlp <args…>` | resolve payload, then **exec** with args (on POSIX `execv` → signals/exit code/stdout are exactly yt-dlp's) |
 | `reclipz ffmpeg <args…>` / `reclipz ffprobe <args…>` | same |
-| `reclipz update [--check] [--version TAG] [--gpg]` | update channel (§3.4) |
+| `reclipz update [--check] [--version TAG] [--force] [--gpg] [--allow-unverified]` | update channel (§3.4) |
+| `reclipz install-service [--dry-run] [--force] [--no-enable] [--linger]` | user-space systemd unit (§4.1) |
+| `reclipz uninstall-service` / `reclipz service-status` | unit removal / `systemctl --user status` |
 | `reclipz which [--json]` | resolved paths + versions + cache dir + target |
 | `reclipz selftest` | exec `yt-dlp --version`, `ffmpeg -version`, write a 1-frame mux test, DNS+TLS to github, report table |
 | `reclipz version` | reclipz version + embedded payload versions + ffmpeg configure line |
@@ -394,19 +402,20 @@ source = 18.3 MB.
 Recommendation: ship `official` for v1 (respects the "use the official binary" requirement), and
 add `lean` as an opt-in build for size/speed. Revisit after real-world use.
 
-### 9.3 Target / asset matrix
+### 9.3 Target / asset matrix (Linux only for now)
 
 | Target | yt-dlp asset | ffmpeg payload |
 | --- | --- | --- |
-| `x86_64-linux-gnu` | `yt-dlp_linux` (glibc ≥ 2.14) | our LGPL build |
-| `x86_64-linux-musl` | `yt-dlp_musllinux` (needs musl loader) | our LGPL build (musl) |
-| `aarch64-linux-gnu` | `yt-dlp_linux_aarch64` | cross-built |
-| `aarch64-linux-musl` | `yt-dlp_musllinux_aarch64` | cross-built |
-| `armv7l-linux-musl` | `yt-dlp_linux_armv7l` | cross-built |
-| `aarch64-macos` / `x86_64-macos` | `yt-dlp_macos` (universal) | prebuilt or user-supplied |
-| `x86_64-windows` / `aarch64-windows` | `yt-dlp.exe` / `yt-dlp_arm64.exe` | prebuilt or user-supplied |
+| `x86_64-linux-gnu` | `yt-dlp_linux` (glibc ≥ 2.14) | `tools/make_ffmpeg.sh` (native) |
+| `x86_64-linux-musl` | `yt-dlp_musllinux` | `tools/make_ffmpeg.sh --target x86_64-linux-musl` |
+| `aarch64-linux-gnu` | `yt-dlp_linux_aarch64` | `tools/make_ffmpeg.sh --target aarch64-linux-gnu` |
+| `aarch64-linux-musl` | `yt-dlp_musllinux_aarch64` | `tools/make_ffmpeg.sh --target aarch64-linux-musl` |
 
-v1 release: `x86_64-linux-gnu` + `x86_64-linux-musl`. Others follow the same recipe.
+Cross-compiling our minimal FFmpeg with `zig cc` works (validated for `aarch64-linux-musl`): pass
+`--enable-cross-compile --arch=… --target-os=linux`, `--disable-asm --disable-x86asm`, and
+`--disable-stripping` with `--extra-ldflags=-s` (the host `strip` cannot touch foreign ELFs).
+macOS and Windows are explicitly out of scope for now; the payload/asset plumbing is generic, so
+adding them later is mostly CI work.
 
 ### 9.4 Licences (simpler than v1)
 

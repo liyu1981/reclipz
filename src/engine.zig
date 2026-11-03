@@ -10,6 +10,63 @@ const log = @import("log.zig");
 const payload = @import("payload.zig");
 const proc = @import("proc.zig");
 
+pub const progress_template = "download:reclipz|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s|%(progress.speed)s|%(progress.eta)s|%(progress.fragment_index)s|%(progress.fragment_count)s";
+
+pub const Progress = struct {
+    downloaded_bytes: ?u64 = null,
+    total_bytes: ?u64 = null,
+    speed: ?f64 = null,
+    eta: ?u64 = null,
+    fragment_index: ?u64 = null,
+    fragment_count: ?u64 = null,
+
+    pub fn percent(self: Progress) ?f64 {
+        const total = self.total_bytes orelse return null;
+        if (total == 0) return null;
+        const done: f64 = @floatFromInt(self.downloaded_bytes orelse 0);
+        return done / @as(f64, @floatFromInt(total)) * 100.0;
+    }
+
+    pub fn isEmpty(self: Progress) bool {
+        return self.downloaded_bytes == null and self.total_bytes == null and self.speed == null;
+    }
+};
+
+fn num(v: []const u8) ?u64 {
+    if (v.len == 0 or std.mem.eql(u8, v, "NA") or std.mem.eql(u8, v, "None")) return null;
+    const f = std.fmt.parseFloat(f64, v) catch return null;
+    if (f < 0) return null;
+    return @intFromFloat(f);
+}
+
+fn fnum(v: []const u8) ?f64 {
+    if (v.len == 0 or std.mem.eql(u8, v, "NA") or std.mem.eql(u8, v, "None")) return null;
+    const f = std.fmt.parseFloat(f64, v) catch return null;
+    if (f < 0) return null;
+    return f;
+}
+
+pub fn parseProgressLine(line: []const u8) ?Progress {
+    if (!std.mem.startsWith(u8, line, "reclipz|")) return null;
+    var it = std.mem.splitScalar(u8, line, '|');
+    _ = it.next(); // prefix
+    const downloaded = it.next() orelse return null;
+    const total = it.next() orelse "NA";
+    const total_est = it.next() orelse "NA";
+    const speed = it.next() orelse "NA";
+    const eta = it.next() orelse "NA";
+    const frag_i = it.next() orelse "NA";
+    const frag_n = it.next() orelse "NA";
+    return .{
+        .downloaded_bytes = num(downloaded),
+        .total_bytes = num(total) orelse num(total_est),
+        .speed = fnum(speed),
+        .eta = num(eta),
+        .fragment_index = num(frag_i),
+        .fragment_count = num(frag_n),
+    };
+}
+
 pub const FormatChoice = enum {
     video,
     audio,
@@ -53,7 +110,7 @@ const ArgList = std.ArrayList([]const u8);
 
 fn addCommon(gpa: std.mem.Allocator, args: *ArgList, cfg: *const config.Config, paths: *const payload.Paths) !void {
     try args.append(gpa, "--no-colors");
-    if (paths.dir) |dir| {
+    if (paths.ffmpeg_dir) |dir| {
         try args.append(gpa, "--ffmpeg-location");
         try args.append(gpa, dir);
     }
@@ -135,6 +192,8 @@ pub fn downloadArgv(
         },
     }
     try args.append(gpa, "--newline");
+    try args.append(gpa, "--progress-template");
+    try args.append(gpa, progress_template);
     try addCommon(gpa, &args, cfg, paths);
     try addExtraArgs(gpa, &args, cfg);
     try args.append(gpa, url);
@@ -151,11 +210,35 @@ pub fn run(
     cfg: *const config.Config,
     argv: []const []const u8,
 ) !proc.Result {
+    return runFull(io, gpa, cfg, argv, null, null);
+}
+
+pub fn runWithProgress(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    cfg: *const config.Config,
+    argv: []const []const u8,
+    progress: ?proc.ProgressSink,
+) !proc.Result {
+    return runFull(io, gpa, cfg, argv, progress, null);
+}
+
+pub fn runFull(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    cfg: *const config.Config,
+    argv: []const []const u8,
+    progress: ?proc.ProgressSink,
+    cancel: ?*const std.atomic.Value(bool),
+) !proc.Result {
     const dir = try std.fmt.allocPrint(gpa, "{s}/tmp", .{cfg.cache_dir});
     fsutil.ensureDir(io, dir) catch {};
     return proc.run(io, gpa, argv, .{
         .timeout_ms = cfg.job_timeout_ms,
         .tmp_dir = dir,
+        .env_map = cfg.child_env,
+        .progress = progress,
+        .cancel = cancel,
     });
 }
 
@@ -381,4 +464,20 @@ test "parse playlist urls" {
         std.testing.allocator.free(urls);
     }
     try std.testing.expectEqual(@as(usize, 2), urls.len);
+}
+
+test "parse progress line" {
+    const p = parseProgressLine("reclipz|1048576|10485760|NA|2097152.5|3.5|NA|5") orelse unreachable;
+    try std.testing.expectEqual(@as(?u64, 1048576), p.downloaded_bytes);
+    try std.testing.expectEqual(@as(?u64, 10485760), p.total_bytes);
+    try std.testing.expectEqual(@as(?f64, 2097152.5), p.speed);
+    try std.testing.expectEqual(@as(?u64, 3), p.eta);
+    try std.testing.expectEqual(@as(?u64, 5), p.fragment_count);
+    try std.testing.expectApproxEqAbs(@as(f64, 10.0), p.percent().?, 0.001);
+}
+
+test "progress line ignores other output" {
+    try std.testing.expect(parseProgressLine("[download]  10% of 1MiB") == null);
+    const p = parseProgressLine("reclipz|NA|NA|NA|NA|NA|NA|NA").?;
+    try std.testing.expect(p.isEmpty());
 }

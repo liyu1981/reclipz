@@ -1,6 +1,5 @@
 const std = @import("std");
 const config = @import("config.zig");
-const engine = @import("engine.zig");
 const fsutil = @import("fsutil.zig");
 const jobs = @import("jobs.zig");
 const log = @import("log.zig");
@@ -8,20 +7,28 @@ const manifest = @import("payload_manifest");
 const payload = @import("payload.zig");
 const proc = @import("proc.zig");
 const server = @import("server.zig");
+const service = @import("service.zig");
+const shutdown = @import("shutdown.zig");
+const update = @import("update.zig");
+const version_mod = @import("version.zig");
 
-const version_string = "0.1.0";
+const version_string = version_mod.string;
 
 const usage =
     \\reclipz — ReClip, a self-hosted video/audio downloader (Zig host, embedded yt-dlp engine)
     \\
     \\Usage:
-    \\  reclipz [serve] [options]     Start the web UI (default command)
-    \\  reclipz yt-dlp <args...>      Run the embedded yt-dlp
-    \\  reclipz ffmpeg <args...>      Run the embedded ffmpeg
-    \\  reclipz ffprobe <args...>     Run the embedded ffprobe
-    \\  reclipz which [--json]        Show resolved engine paths and versions
-    \\  reclipz selftest              Check that the embedded engine runs
-    \\  reclipz version               Show versions
+    \\  reclipz [serve] [options]      Start the web UI (default command)
+    \\  reclipz yt-dlp <args...>       Run the embedded yt-dlp
+    \\  reclipz ffmpeg <args...>       Run the embedded ffmpeg
+    \\  reclipz ffprobe <args...>      Run the embedded ffprobe
+    \\  reclipz update [--check]       Update the embedded yt-dlp payload (no rebuild)
+    \\  reclipz install-service        Install as a user-space systemd service
+    \\  reclipz uninstall-service      Remove the systemd service
+    \\  reclipz service-status         Show the systemd service status
+    \\  reclipz which [--json]         Show resolved engine paths and versions
+    \\  reclipz selftest               Check that the embedded engine runs
+    \\  reclipz version                Show versions
     \\
     \\Serve options:
     \\  --port <n>          Port to listen on            (env PORT, default 8899)
@@ -33,6 +40,9 @@ const usage =
     \\  --engine <mode>     embedded | system | auto     (env RECLIPZ_ENGINE, default embedded)
     \\  --log <level>       error | warn | info | debug  (env RECLIPZ_LOG, default info)
     \\  -h, --help          Show this help
+    \\
+    \\install-service options: --dry-run, --force, --no-enable, --linger
+    \\update options:          --check, --version <tag>, --force, --gpg, --allow-unverified
     \\
 ;
 
@@ -53,7 +63,6 @@ pub fn main(init: std.process.Init) !void {
     var cfg = try config.Config.load(sa, env.*);
 
     if (args.len == 0) return runServe(io, sa, gpa, env, &cfg, args);
-
     const cmd = args[0];
     const rest = args[1..];
 
@@ -69,11 +78,13 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, cmd, "ffprobe")) return runPassthrough(io, sa, env, &cfg, rest, .ffprobe);
     if (std.mem.eql(u8, cmd, "which")) return runWhich(io, sa, env, &cfg, rest);
     if (std.mem.eql(u8, cmd, "selftest")) return runSelftest(io, sa, env, &cfg);
-    if (std.mem.eql(u8, cmd, "version") or std.mem.eql(u8, cmd, "--version")) return runVersion(io, sa, env, &cfg);
-    if (std.mem.eql(u8, cmd, "update")) {
-        std.debug.print("reclipz: `update` is not implemented in this build yet (see docs/PLAN.md M2)\n", .{});
-        std.process.exit(2);
+    if (std.mem.eql(u8, cmd, "version") or std.mem.eql(u8, cmd, "--version")) {
+        return runVersion(io, sa, env, &cfg);
     }
+    if (std.mem.eql(u8, cmd, "update")) return runUpdate(io, sa, env, &cfg, rest);
+    if (std.mem.eql(u8, cmd, "install-service")) return runInstallService(io, sa, gpa, env, &cfg, rest);
+    if (std.mem.eql(u8, cmd, "uninstall-service")) return service.uninstall(io, sa, env.*);
+    if (std.mem.eql(u8, cmd, "service-status")) return service.status(io);
     if (std.mem.startsWith(u8, cmd, "-")) return runServe(io, sa, gpa, env, &cfg, args);
 
     std.debug.print("reclipz: unknown command '{s}'\n\n{s}", .{ cmd, usage });
@@ -107,10 +118,16 @@ fn runServe(
 
     const paths = payload.resolve(scratch, io, cfg, env.*) catch |e| {
         log.err("engine unavailable: {s}", .{@errorName(e)});
+        log.err("hint: run `reclipz update`, `tools/fetch_payloads.sh`, or set RECLIPZ_YTDLP", .{});
         std.process.exit(1);
     };
     var mutable_paths = paths;
+    cfg.child_env = try buildChildEnv(runtime, io, env.*, cfg, &mutable_paths);
+
     var registry = try jobs.Registry.init(runtime, io, cfg, &mutable_paths);
+
+    shutdown.install();
+    shutdown.startWatcher(io);
 
     var app: server.App = .{
         .gpa = runtime,
@@ -120,6 +137,27 @@ fn runServe(
         .registry = &registry,
     };
     try server.serve(&app);
+}
+
+/// The engine gets its own environment: TMPDIR in our cache (PyInstaller unpacks there) and a PATH
+/// that contains the embedded ffmpeg, so yt-dlp never depends on the host installation.
+fn buildChildEnv(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    parent: std.process.Environ.Map,
+    cfg: *const config.Config,
+    paths: *const payload.Paths,
+) !*std.process.Environ.Map {
+    const map = try gpa.create(std.process.Environ.Map);
+    map.* = try parent.clone(gpa);
+    const tmp = try payload.tmpPath(gpa, io, cfg);
+    try map.put("TMPDIR", tmp);
+    try map.put("TMP", tmp);
+    if (paths.ffmpeg_dir) |dir| {
+        const cur = map.get("PATH") orelse "/usr/local/bin:/usr/bin:/bin";
+        try map.put("PATH", try std.fmt.allocPrint(gpa, "{s}:{s}", .{ dir, cur }));
+    }
+    return map;
 }
 
 fn parseServeFlags(gpa: std.mem.Allocator, args: []const []const u8, cfg: *config.Config) !?[]const u8 {
@@ -182,14 +220,14 @@ const Which = enum { ytdlp, ffmpeg, ffprobe };
 
 fn runPassthrough(
     io: std.Io,
-    gpa: std.mem.Allocator,
+    scratch: std.mem.Allocator,
     env: *std.process.Environ.Map,
     cfg: *config.Config,
     rest: []const []const u8,
     which: Which,
 ) !void {
     log.setLevel(cfg.log_level);
-    const paths = payload.resolve(gpa, io, cfg, env.*) catch |e| {
+    const paths = payload.resolve(scratch, io, cfg, env.*) catch |e| {
         log.err("engine unavailable: {s}", .{@errorName(e)});
         std.process.exit(1);
     };
@@ -208,57 +246,79 @@ fn runPassthrough(
 
     // Everything after the subcommand belongs to the engine, verbatim.
     var argv: std.ArrayList([]const u8) = .empty;
-    try argv.append(gpa, bin);
-    for (rest) |a| try argv.append(gpa, a);
-    const code = try proc.passthrough(io, argv.items);
+    try argv.append(scratch, bin);
+    for (rest) |a| try argv.append(scratch, a);
+
+    const child_env = try buildChildEnv(scratch, io, env.*, cfg, &paths);
+    const code = try proc.passthrough(io, argv.items, child_env);
     std.process.exit(code);
 }
 
-fn runWhich(io: std.Io, gpa: std.mem.Allocator, env: *std.process.Environ.Map, cfg: *config.Config, rest: []const []const u8) !void {
+fn runWhich(
+    io: std.Io,
+    scratch: std.mem.Allocator,
+    env: *std.process.Environ.Map,
+    cfg: *config.Config,
+    rest: []const []const u8,
+) !void {
     _ = rest;
-    const paths = payload.resolve(gpa, io, cfg, env.*) catch |e| {
+    const paths = payload.resolve(scratch, io, cfg, env.*) catch |e| {
         std.debug.print("engine unavailable: {s}\n", .{@errorName(e)});
         std.process.exit(1);
     };
-    std.debug.print("reclipz  {s}\n", .{version_string});
-    std.debug.print("target   {s}-{s}\n", .{ @tagName(@import("builtin").cpu.arch), @tagName(@import("builtin").os.tag) });
-    std.debug.print("yt-dlp   {s} ({s}, {s})\n", .{ paths.ytdlp, paths.version, @tagName(paths.source) });
-    if (paths.ffmpeg) |f| std.debug.print("ffmpeg   {s}\n", .{f});
-    if (paths.ffprobe) |f| std.debug.print("ffprobe  {s}\n", .{f});
-    std.debug.print("cache    {s}\n", .{cfg.cache_dir});
-    std.debug.print("download {s}\n", .{cfg.download_dir});
+    std.debug.print("reclipz    {s}\n", .{version_string});
+    std.debug.print("target     {s}-{s}\n", .{ @tagName(@import("builtin").cpu.arch), @tagName(@import("builtin").abi) });
+    std.debug.print("yt-dlp     {s}\n", .{paths.ytdlp});
+    std.debug.print("  version  {s} ({s})\n", .{ paths.version, @tagName(paths.source) });
+    if (paths.ffmpeg) |f| std.debug.print("ffmpeg     {s}\n", .{f});
+    if (paths.ffprobe) |f| std.debug.print("ffprobe    {s}\n", .{f});
+    std.debug.print("cache      {s}\n", .{cfg.cache_dir});
+    std.debug.print("downloads  {s}\n", .{cfg.download_dir});
 }
 
-fn runVersion(io: std.Io, gpa: std.mem.Allocator, env: *std.process.Environ.Map, cfg: *config.Config) !void {
+fn runVersion(
+    io: std.Io,
+    scratch: std.mem.Allocator,
+    env: *std.process.Environ.Map,
+    cfg: *config.Config,
+) !void {
     std.debug.print("reclipz {s}\n", .{version_string});
     if (manifest.has_ytdlp) {
         std.debug.print("embedded yt-dlp {s}\n", .{manifest.ytdlp_version});
     } else {
         std.debug.print("embedded yt-dlp: none\n", .{});
     }
-    const paths = payload.resolve(gpa, io, cfg, env.*) catch return;
+    const paths = payload.resolve(scratch, io, cfg, env.*) catch return;
     const argv = [_][]const u8{ paths.ytdlp, "--version" };
-    if (engine.run(io, gpa, cfg, &argv)) |res| {
+    if (engineRun(io, scratch, cfg, &argv)) |res| {
         if (res.ok()) std.debug.print("engine yt-dlp {s}\n", .{std.mem.trim(u8, res.stdout, " \t\r\n")});
     } else |_| {}
 }
 
-fn runSelftest(io: std.Io, gpa: std.mem.Allocator, env: *std.process.Environ.Map, cfg: *config.Config) !void {
+fn engineRun(io: std.Io, gpa: std.mem.Allocator, cfg: *const config.Config, argv: []const []const u8) !proc.Result {
+    const dir = try payload.tmpPath(gpa, io, cfg);
+    return proc.run(io, gpa, argv, .{ .timeout_ms = 30_000, .tmp_dir = dir, .env_map = cfg.child_env });
+}
+
+fn runSelftest(
+    io: std.Io,
+    scratch: std.mem.Allocator,
+    env: *std.process.Environ.Map,
+    cfg: *config.Config,
+) !void {
     log.setLevel(.info);
     std.debug.print("reclipz selftest\n", .{});
     std.debug.print("  host: {s}  port: {d}\n", .{ cfg.host, cfg.port });
     std.debug.print("  cache dir: {s}\n", .{cfg.cache_dir});
 
-    const paths = payload.resolve(gpa, io, cfg, env.*) catch |e| {
+    const paths = payload.resolve(scratch, io, cfg, env.*) catch |e| {
         std.debug.print("  [FAIL] engine resolve: {s}\n", .{@errorName(e)});
         std.process.exit(1);
     };
-    std.debug.print("  [ ok ] engine resolved: {s} ({s})\n", .{ paths.ytdlp, @tagName(paths.source) });
+    std.debug.print("  [ ok ] engine resolved: {s} ({s} {s})\n", .{ paths.ytdlp, paths.version, @tagName(paths.source) });
+    cfg.child_env = try buildChildEnv(scratch, io, env.*, cfg, &paths);
 
-    const tmp = try std.fmt.allocPrint(gpa, "{s}/tmp", .{cfg.cache_dir});
-    fsutil.ensureDir(io, tmp) catch {};
-
-    const yt = proc.run(io, gpa, &.{ paths.ytdlp, "--version" }, .{ .timeout_ms = 30_000, .tmp_dir = tmp }) catch |e| {
+    const yt = engineRun(io, scratch, cfg, &.{ paths.ytdlp, "--version" }) catch |e| {
         std.debug.print("  [FAIL] yt-dlp did not run: {s}\n", .{@errorName(e)});
         std.process.exit(1);
     };
@@ -269,7 +329,7 @@ fn runSelftest(io: std.Io, gpa: std.mem.Allocator, env: *std.process.Environ.Map
     }
 
     if (paths.ffmpeg) |ff| {
-        const r = proc.run(io, gpa, &.{ ff, "-version" }, .{ .timeout_ms = 30_000, .tmp_dir = tmp }) catch |e| {
+        const r = engineRun(io, scratch, cfg, &.{ ff, "-version" }) catch |e| {
             std.debug.print("  [FAIL] ffmpeg did not run: {s}\n", .{@errorName(e)});
             std.process.exit(1);
         };
@@ -283,4 +343,87 @@ fn runSelftest(io: std.Io, gpa: std.mem.Allocator, env: *std.process.Environ.Map
         std.debug.print("  [warn] no ffmpeg available (merging/MP3 conversion will fail)\n", .{});
     }
     std.debug.print("done\n", .{});
+}
+
+fn runUpdate(
+    io: std.Io,
+    scratch: std.mem.Allocator,
+    env: *std.process.Environ.Map,
+    cfg: *config.Config,
+    rest: []const []const u8,
+) !void {
+    var opts: update.Options = .{};
+    var i: usize = 0;
+    while (i < rest.len) : (i += 1) {
+        const a = rest[i];
+        if (std.mem.eql(u8, a, "--check")) {
+            opts.check_only = true;
+        } else if (std.mem.eql(u8, a, "--version")) {
+            i += 1;
+            if (i >= rest.len) {
+                std.debug.print("reclipz: missing value for --version\n", .{});
+                std.process.exit(2);
+            }
+            opts.version = rest[i];
+        } else if (std.mem.eql(u8, a, "--force")) {
+            opts.force = true;
+        } else if (std.mem.eql(u8, a, "--gpg")) {
+            opts.gpg = true;
+        } else if (std.mem.eql(u8, a, "--allow-unverified")) {
+            opts.allow_unverified = true;
+        } else if (isHelp(a)) {
+            std.debug.print("usage: reclipz update [--check] [--version <tag>] [--force] [--gpg] [--allow-unverified]\n", .{});
+            return;
+        } else {
+            std.debug.print("reclipz: unknown option '{s}'\n", .{a});
+            std.process.exit(2);
+        }
+    }
+    log.setLevel(cfg.log_level);
+    _ = env;
+    update.run(io, scratch, cfg, opts) catch |e| {
+        log.err("update failed: {s}", .{@errorName(e)});
+        std.process.exit(1);
+    };
+}
+
+fn runInstallService(
+    io: std.Io,
+    scratch: std.mem.Allocator,
+    runtime: std.mem.Allocator,
+    env: *std.process.Environ.Map,
+    cfg: *config.Config,
+    rest: []const []const u8,
+) !void {
+    _ = runtime;
+    var svc: service.Options = .{};
+    var serve_args: std.ArrayList([]const u8) = .empty;
+    var i: usize = 0;
+    while (i < rest.len) : (i += 1) {
+        const a = rest[i];
+        if (std.mem.eql(u8, a, "--dry-run")) {
+            svc.dry_run = true;
+        } else if (std.mem.eql(u8, a, "--force")) {
+            svc.force = true;
+        } else if (std.mem.eql(u8, a, "--no-enable")) {
+            svc.enable = false;
+        } else if (std.mem.eql(u8, a, "--linger")) {
+            svc.linger = true;
+        } else if (isHelp(a)) {
+            std.debug.print("usage: reclipz install-service [--dry-run] [--force] [--no-enable] [--linger] [serve options]\n", .{});
+            return;
+        } else {
+            try serve_args.append(scratch, a);
+        }
+    }
+
+    if (try parseServeFlags(scratch, serve_args.items, cfg)) |msg| {
+        std.debug.print("reclipz: {s}\n", .{msg});
+        std.process.exit(2);
+    }
+
+    service.install(io, scratch, cfg, env.*, svc) catch |e| {
+        log.err("install-service failed: {s}", .{@errorName(e)});
+        std.process.exit(1);
+    };
 }

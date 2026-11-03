@@ -1,0 +1,19 @@
+services:
+  reclipz:
+    build: .
+    image: reclipz:latest
+    container_name: reclipz
+    ports:
+      - "8899:8899"
+    volumes:
+      - reclipz-downloads:/downloads
+      - reclipz-cache:/cache
+    environment:
+      RECLIPZ_LOG: info
+      # RECLIPZ_COOKIES: /cache/cookies.txt
+      # RECLIPZ_PROXY: http://proxy:8080
+    restart: unless-stopped
+
+volumes:
+  reclipz-downloads:
+  reclipz-cache:

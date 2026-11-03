@@ -31,6 +31,8 @@ pub const Job = struct {
     file: ?[]const u8 = null,
     filename: ?[]const u8 = null,
     created_ns: i128 = 0,
+    progress: engine.Progress = .{},
+    cancel: std.atomic.Value(bool) = .init(false),
 };
 
 pub const Registry = struct {
@@ -68,6 +70,7 @@ pub const Registry = struct {
         err: ?[]const u8 = null,
         filename: ?[]const u8 = null,
         file: ?[]const u8 = null,
+        progress: engine.Progress = .{},
     };
 
     pub fn snapshot(self: *Registry, allocator: std.mem.Allocator, id: []const u8) !?Snapshot {
@@ -79,7 +82,18 @@ pub const Registry = struct {
             .err = if (job.err) |e| try allocator.dupe(u8, e) else null,
             .filename = if (job.filename) |f| try allocator.dupe(u8, f) else null,
             .file = if (job.file) |f| try allocator.dupe(u8, f) else null,
+            .progress = job.progress,
         };
+    }
+
+    /// Ask a running job to stop (the engine process group is killed by the monitor thread).
+    pub fn cancel(self: *Registry, id: []const u8) bool {
+        self.lock();
+        defer self.unlock();
+        const job = self.jobs.get(id) orelse return false;
+        if (job.status != .downloading) return false;
+        job.cancel.store(true, .release);
+        return true;
     }
 
     /// Start a download job. Returns the job id (10 hex chars, like reclip).
@@ -210,13 +224,21 @@ fn download(reg: *Registry, ctx: *Ctx) !void {
     const template = try std.fmt.allocPrint(gpa, "{s}/{s}.%(ext)s", .{ job_dir, job.id });
 
     const argv = try engine.downloadArgv(gpa, cfg, reg.paths, job.url, ctx.choice, ctx.format_id, template);
-    const res = engine.run(io, gpa, cfg, argv) catch |e| {
+
+    var sink_ctx: ProgressCtx = .{ .reg = reg, .job = job };
+    const sink: proc.ProgressSink = .{ .ctx = @ptrCast(&sink_ctx), .onLine = onProgressLine };
+
+    const res = engine.runFull(io, gpa, cfg, argv, sink, &job.cancel) catch |e| {
         reg.setError(job, try std.fmt.allocPrint(gpa, "Engine failed to start: {s}", .{@errorName(e)}));
         return;
     };
 
     if (res.timed_out) {
         reg.setError(job, "Download timed out (5 min limit)");
+        return;
+    }
+    if (res.cancelled) {
+        reg.setError(job, "Download cancelled");
         return;
     }
     if (!res.ok()) {
@@ -249,4 +271,17 @@ fn download(reg: *Registry, ctx: *Ctx) !void {
 
     reg.setDone(job, final_path, filename);
     log.info("job {s} done -> {s}", .{ job.id, filename });
+}
+
+const ProgressCtx = struct {
+    reg: *Registry,
+    job: *Job,
+};
+
+fn onProgressLine(raw_ctx: *anyopaque, line: []const u8) void {
+    const ctx: *ProgressCtx = @ptrCast(@alignCast(raw_ctx));
+    const progress = engine.parseProgressLine(line) orelse return;
+    ctx.reg.lock();
+    defer ctx.reg.unlock();
+    ctx.job.progress = progress;
 }

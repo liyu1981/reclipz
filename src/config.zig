@@ -28,6 +28,8 @@ pub const Config = struct {
     proxy: ?[]const u8 = null,
     extra_args: ?[]const u8 = null,
     log_level: log.Level = .info,
+    /// Environment for engine child processes (TMPDIR, PATH); set by main.
+    child_env: ?*std.process.Environ.Map = null,
 
     pub const Env = std.process.Environ.Map;
 

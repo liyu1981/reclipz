@@ -1,4 +1,7 @@
 .zig-cache/
 zig-out/
 payload/
+payload-*/
+dist/
+out/
 downloads/
