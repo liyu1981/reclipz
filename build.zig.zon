@@ -1,6 +1,6 @@
 .{
     .name = .reclipz,
-    .version = "0.1.0",
+    .version = "0.1.1",
     .fingerprint = 0xc929d4c81fb68dc8,
     .minimum_zig_version = "0.17.0",
     .dependencies = .{},

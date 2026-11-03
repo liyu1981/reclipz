@@ -6,15 +6,25 @@ All notable changes to reclipz are documented here. The format is loosely based 
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-11-03
+
 ### Added
 
 - `reclipz cache info [--json]` and `reclipz cache clean [--tmp|--engines|--downloads|--all]
   [--dry-run]` to inspect and reclaim disk space (engine versions, leaked temp entries,
   finished downloads).
 - `RECLIPZ_TMP_TTL` (default 3600 s; `0` disables) and `RECLIPZ_KEEP_PARTIAL` for controlling
-  temp-file cleanup; stale temp entries are swept at startup and every 60 s.
-- Obsolete yt-dlp/ffmpeg payload versions are pruned at startup, not only after `reclipz update`.
-- README: "Disk usage and cleanup" section documenting where bytes go and what deletes them.
+  temp-file cleanup.
+- `tools/dev.sh`: build and run a throwaway dev server (`./.dev/{cache,downloads}`), with
+  `--fixture` for a local test URL, `--release`, `--no-build`, `--reset`, `--fetch`.
+
+### Changed
+
+- Job/TTL sweeper runs every 60 s (was 300 s); stale temp entries are swept at startup and every
+  60 s, and obsolete yt-dlp/ffmpeg payload versions are pruned at startup (not only after
+  `reclipz update`).
+- `HOST` / `--host` placeholders are normalised (`auto`/`localhost` → `127.0.0.1`,
+  `any`/`*`/`all` → `0.0.0.0`) so a polluted environment cannot break the bind.
 
 ### Fixed
 
@@ -26,9 +36,10 @@ All notable changes to reclipz are documented here. The format is loosely based 
   set of `payload.resolve`); the hint now compares `@errorName`.
 - Partial files of failed/cancelled/timed-out jobs are deleted (`downloads/.tmp/<job>/`); previously
   they were left behind.
-- README: release-asset choice (gnu vs musl) and a troubleshooting table.
+- Docs: release-asset choice (gnu vs musl), checksum verification, troubleshooting table,
+  "Disk usage and cleanup" section.
 
-## [0.1.0] — 2025-11-03
+## [0.1.0] — 2026-11-03
 
 First public release. `reclipz` is a Zig re-implementation of
 [ReClip](https://github.com/averygan/reclip): the same web UI and API, packaged as a single
