@@ -202,6 +202,11 @@ churn) is in [`docs/RESEARCH.md`](docs/RESEARCH.md); the architecture, API contr
 in [`docs/PLAN.md`](docs/PLAN.md). Every number was measured; probes live in
 [`docs/experiments/`](docs/experiments/).
 
+## Changelog
+
+See [`CHANGELOG.md`](CHANGELOG.md) (release notes for each version are in
+[`docs/release-notes/`](docs/release-notes/)).
+
 ## Disclaimer
 
 For personal use only. Respect copyright law and the terms of service of the platforms you download

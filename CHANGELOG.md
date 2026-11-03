@@ -1,0 +1,108 @@
+# Changelog
+
+All notable changes to reclipz are documented here. The format is loosely based on
+[Keep a Changelog](https://keepachangelog.com/), and the project follows
+[Semantic Versioning](https://semver.org/).
+
+## [0.1.0] — 2025-11-03
+
+First public release. `reclipz` is a Zig re-implementation of
+[ReClip](https://github.com/averygan/reclip): the same web UI and API, packaged as a single
+self-contained binary with the official yt-dlp engine and a minimal static ffmpeg embedded.
+
+### Highlights
+
+- **One binary, no runtime dependencies.** The official `yt-dlp` release binary and a minimal
+  LGPL `ffmpeg`/`ffprobe` are compiled into the executable, extracted once into a versioned,
+  hash-verified cache directory and executed from there. No Python, no `pip install`,
+  no `apt install ffmpeg`.
+- **Byte-identical frontend.** Upstream `templates/index.html` is embedded verbatim; the 7 API
+  endpoints, status codes, error strings, format labels and filename rules match ReClip, so the UI
+  needs no changes.
+- **Updatable engine.** `reclipz update` downloads the latest official yt-dlp asset, verifies it
+  against the release's `SHA2-256SUMS` (optionally its GPG signature), installs it into a versioned
+  cache directory and atomically repoints `engine.json`. Site fixes no longer require a rebuild.
+  `--check`, `--version <tag>`, `--force`, `--allow-unverified` are supported.
+- **systemd user service.** `reclipz install-service` writes a hardened
+  `~/.config/systemd/user/reclipz.service`, enables and starts it, and waits for it to become
+  active; `--dry-run`, `--force`, `--no-enable`, `--linger`, `--no-hardening` (containers) are
+  available. `uninstall-service` and `service-status` complete the lifecycle.
+- **Real download pipeline.** Format selection identical to ReClip (`<format_id>+bestaudio/best`,
+  `--merge-output-format mp4`), MP3 extraction via LAME, per-job temp directories with atomic
+  finalisation, process-group timeouts, and no orphaned engine processes on shutdown.
+- **Live progress and cancellation.** `/api/status` now also returns
+  `progress {downloaded_bytes,total_bytes,speed,eta,percent,…}`, and `POST /api/cancel/<id>` stops a
+  job (additive; the upstream UI ignores both).
+- **Linux release matrix.** x86_64 and aarch64, glibc and musl, built from a single
+  `tools/make_ffmpeg.sh --target …` cross-compilation recipe (zig cc, no cross toolchain).
+- **Docker.** Multi-stage-free Alpine/musl image running as uid 1000, with `/downloads` and `/cache`
+  volumes.
+
+### Measured
+
+| | |
+| --- | --- |
+| x86_64 release binary | 57 MB raw · **49 MB stripped** |
+| Engine-less build (`-Dpayload-dir=none`) | 5.4 MB |
+| One-time cache after first run | ~47 MB |
+| Engine overhead per invocation | ~0.8 s (PyInstaller self-extract) |
+| `reclipz selftest` (warm) | ~1 s |
+| `reclipz update` (41 MB asset, verify + install) | ~2.5 s |
+
+### Quick start
+
+```bash
+# download the binary for your platform from the release assets, then
+./reclipz-0.1.0-x86_64-linux-gnu            # web UI on http://127.0.0.1:8899
+./reclipz-0.1.0-x86_64-linux-gnu install-service
+./reclipz-0.1.0-x86_64-linux-gnu update     # keep the engine current
+```
+
+Building from source:
+
+```bash
+tools/fetch_payloads.sh && tools/make_ffmpeg.sh
+zig build -Doptimize=ReleaseSmall
+```
+
+### Supported targets
+
+| Target | yt-dlp payload |
+| --- | --- |
+| `x86_64-linux-gnu` | `yt-dlp_linux` (glibc ≥ 2.14) |
+| `x86_64-linux-musl` | `yt-dlp_musllinux` |
+| `aarch64-linux-gnu` | `yt-dlp_linux_aarch64` |
+| `aarch64-linux-musl` | `yt-dlp_musllinux_aarch64` |
+
+### Configuration
+
+`PORT`, `HOST` (ReClip parity), `RECLIPZ_DOWNLOAD_DIR`, `RECLIPZ_CACHE_DIR`,
+`RECLIPZ_MAX_CONCURRENT`, `RECLIPZ_JOB_TIMEOUT`, `RECLIPZ_JOB_TTL`, `RECLIPZ_ENGINE`,
+`RECLIPZ_YTDLP`, `RECLIPZ_FFMPEG`, `RECLIPZ_COOKIES`, `RECLIPZ_PROXY`, `RECLIPZ_YTDLP_ARGS`,
+`RECLIPZ_LOG`. See the README for details.
+
+### Known limitations
+
+- macOS and Windows are out of scope for this release (the payload plumbing is generic).
+- Plain HTTP only, like upstream ReClip; use a reverse proxy for TLS/auth (README has recipes).
+- YouTube PO-token-gated formats and DRM are not supported — the same limitation as upstream
+  yt-dlp, which also ships no botguard provider.
+- A real-browser UI test is not automated; the unmodified UI is exercised through the HTTP API in
+  `tests/e2e.sh`.
+
+### Tests
+
+`zig build test` (unit), `tests/e2e.sh` (UI byte-identity, `/api/info`, error parity, MP4 h264+aac,
+MP3, six concurrent jobs, live progress, cancellation, graceful shutdown without orphan processes),
+`tests/service.sh` (live `systemctl --user` install/start/uninstall), `tests/network.sh` (nightly,
+real sites).
+
+### License
+
+MIT (ReClip is MIT). The embedded `yt-dlp` payload is Unlicense; the embedded `ffmpeg`/`ffprobe`
+payload is LGPL-2.1+ (built without GPL components). See `LICENSE` and `docs/PLAN.md` §9.4.
+
+### Disclaimer
+
+For personal use only. Respect copyright law and the terms of service of the platforms you download
+from.
