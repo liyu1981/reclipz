@@ -93,6 +93,11 @@ tar -C "$work" -xf "$work/ffmpeg.tar.xz"
     "${ff_cross[@]}" \
     --extra-cflags="-I$work/lame/include" --extra-ldflags="$ldflags" \
     >/dev/null
+  # zig's glibc provides the sysctl() symbol but not <sys/sysctl.h>, so configure's function
+  # probe succeeds while the header include later fails. Disable the (unused on Linux) check.
+  if [[ "$target" == *gnu* ]]; then
+    sed -i 's/^#define HAVE_SYSCTL 1$/#define HAVE_SYSCTL 0/' config.h
+  fi
   make -j"$jobs" >/dev/null
 )
 
