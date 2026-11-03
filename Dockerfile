@@ -13,7 +13,15 @@
 # and the `yt-dlp_linux` payload instead.
 FROM alpine:3
 
+# Run as an unprivileged user so bind-mounted download/cache dirs are not owned by root.
+RUN adduser -D -u 1000 -h /home/reclipz reclipz \
+ && mkdir -p /downloads /cache \
+ && chown -R reclipz:reclipz /downloads /cache /home/reclipz
+
 COPY zig-out/bin/reclipz /usr/local/bin/reclipz
+
+# Fail the image build early if the binary cannot run on this base image (libc mismatch).
+RUN /usr/local/bin/reclipz --help >/dev/null
 
 # The engine (a PyInstaller binary) needs a writable TMPDIR; we point it at the cache volume.
 # HOME is set so yt-dlp's config/cache lookups stay inside the volume too.
@@ -24,7 +32,7 @@ ENV HOST=0.0.0.0 \
     HOME=/cache \
     RECLIPZ_LOG=info
 
-RUN mkdir -p /downloads /cache
+USER reclipz
 
 VOLUME ["/downloads", "/cache"]
 EXPOSE 8899

@@ -104,6 +104,27 @@ curl -sf "http://127.0.0.1:$PORT/api/file/$jid" -o "$WORK/audio.mp3"
   || fail "audio is not mp3"
 pass "audio download -> MP3"
 
+# --- concurrency: several jobs at once ------------------------------------------------------
+jids=()
+for i in 1 2 3 4 5 6; do
+  jid=$(curl -sf -X POST -H 'content-type: application/json' \
+    -d "{\"url\":\"http://127.0.0.1:$PORT_HTTP/sample.mp4\",\"format\":\"video\",\"title\":\"Par $i\"}" \
+    "http://127.0.0.1:$PORT/api/download" | json 'd["job_id"]')
+  jids+=("$jid")
+done
+done_count=0
+for _ in $(seq 1 180); do
+  done_count=0
+  for jid in "${jids[@]}"; do
+    st=$(curl -sf "http://127.0.0.1:$PORT/api/status/$jid")
+    echo "$st" | grep -q '"status":"done"' && done_count=$((done_count + 1))
+  done
+  [[ "$done_count" -eq "${#jids[@]}" ]] && break
+  sleep 0.5
+done
+[[ "$done_count" -eq "${#jids[@]}" ]] || fail "concurrency: $done_count/${#jids[@]} jobs finished"
+pass "${#jids[@]} concurrent downloads"
+
 # --- progress + cancellation ----------------------------------------------------------------
 jid=$(curl -sf -X POST -H 'content-type: application/json' \
   -d "{\"url\":\"http://127.0.0.1:$PORT_SLOW/slow.mp4\",\"format\":\"video\",\"title\":\"Slow\"}" \

@@ -125,6 +125,7 @@ pub fn run(
                 var b: [4096]u8 = undefined;
                 var w = f.writer(io, &b);
                 try w.interface.writeAll(sums);
+                try w.interface.flush();
             }
             if (release.sig_url) |sig_url| {
                 const sig_path = try std.fmt.allocPrint(gpa, "{s}.sig", .{sums_path});

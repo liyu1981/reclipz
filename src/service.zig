@@ -4,6 +4,7 @@ const std = @import("std");
 const config = @import("config.zig");
 const fsutil = @import("fsutil.zig");
 const log = @import("log.zig");
+const payload = @import("payload.zig");
 const proc = @import("proc.zig");
 
 pub const service_name = "reclipz.service";
@@ -13,6 +14,9 @@ pub const Options = struct {
     force: bool = false,
     enable: bool = true,
     linger: bool = false,
+    /// Emit the sandboxing directives. Disable on systems whose user manager cannot apply them
+    /// (e.g. some containers: "Failed to drop capabilities").
+    hardening: bool = true,
 };
 
 pub const UnitSpec = struct {
@@ -25,6 +29,7 @@ pub const UnitSpec = struct {
     log_level: []const u8,
     cookies: ?[]const u8 = null,
     proxy: ?[]const u8 = null,
+    hardening: bool = true,
 };
 
 pub fn renderUnit(gpa: std.mem.Allocator, spec: UnitSpec) ![]u8 {
@@ -52,18 +57,24 @@ pub fn renderUnit(gpa: std.mem.Allocator, spec: UnitSpec) ![]u8 {
     if (spec.cookies) |c| try w.print("Environment=RECLIPZ_COOKIES={s}\n", .{c});
     if (spec.proxy) |p| try w.print("Environment=RECLIPZ_PROXY={s}\n", .{p});
 
+    if (spec.hardening) {
+        try w.writeAll(
+            \\
+            \\# Hardening (the engine only needs network + its cache/download dirs).
+            \\# ProtectKernelModules is deliberately omitted: it needs CAP_SYS_MODULE, which an
+            \\# unprivileged user manager may not have (install with --no-hardening if a container
+            \\# still refuses these).
+            \\NoNewPrivileges=yes
+            \\PrivateTmp=yes
+            \\ProtectSystem=full
+            \\ProtectControlGroups=yes
+            \\ProtectKernelTunables=yes
+            \\RestrictSUIDSGID=yes
+            \\LockPersonality=yes
+            \\
+        );
+    }
     try w.writeAll(
-        \\
-        \\# Hardening (the engine only needs network + its cache/download dirs)
-        \\NoNewPrivileges=yes
-        \\PrivateTmp=yes
-        \\ProtectSystem=full
-        \\ProtectControlGroups=yes
-        \\ProtectKernelTunables=yes
-        \\ProtectKernelModules=yes
-        \\RestrictSUIDSGID=yes
-        \\LockPersonality=yes
-        \\
         \\[Install]
         \\WantedBy=default.target
         \\
@@ -103,6 +114,7 @@ pub fn install(
         .log_level = @tagName(cfg.log_level),
         .cookies = cfg.cookies,
         .proxy = cfg.proxy,
+        .hardening = opts.hardening,
     });
 
     if (opts.dry_run) {
@@ -133,10 +145,18 @@ pub fn install(
 
     if (opts.enable) {
         if (try systemctl(io, gpa, &.{ "enable", "--now", service_name })) {
-            log.info("service enabled and started", .{});
+            if (waitActive(io, gpa, cfg)) {
+                log.info("service enabled and active", .{});
+            } else {
+                log.err("the unit was installed and enabled, but did not become active", .{});
+                log.err("inspect: journalctl --user -u {s} -n 20 --no-pager", .{service_name});
+                log.err("if it failed with capabilities/sandbox errors, re-run with --no-hardening", .{});
+                return error.ServiceNotActive;
+            }
         } else {
             log.err("could not enable/start {s}", .{service_name});
             log.err("inspect with: systemctl --user status {s}", .{service_name});
+            return error.ServiceNotActive;
         }
     } else {
         log.info("unit installed (not enabled); start it with: systemctl --user enable --now {s}", .{service_name});
@@ -188,6 +208,20 @@ pub fn status(io: std.Io) !void {
 }
 
 // ---------------------------------------------------------------------------------------------
+
+fn waitActive(io: std.Io, gpa: std.mem.Allocator, cfg: *const config.Config) bool {
+    const tmp = payload.tmpPath(gpa, io, cfg) catch "/tmp";
+    var attempts: usize = 0;
+    while (attempts < 12) : (attempts += 1) {
+        const res = proc.run(io, gpa, &.{ "systemctl", "--user", "is-active", service_name }, .{
+            .timeout_ms = 5000,
+            .tmp_dir = tmp,
+        }) catch return false;
+        if (res.ok() and std.mem.indexOf(u8, res.stdout, "active") != null) return true;
+        io.sleep(.fromMilliseconds(500), .awake) catch {};
+    }
+    return false;
+}
 
 fn systemctl(io: std.Io, gpa: std.mem.Allocator, args: []const []const u8) !bool {
     var argv: std.ArrayList([]const u8) = .empty;

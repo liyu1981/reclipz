@@ -43,25 +43,39 @@ it can be added as an *optional* third engine without changing anything else.
 | **M1** payload layer, process layer, real engine, download+merge+MP3 | **done** |
 | **M2** `reclipz update`, live progress, cancellation, graceful shutdown, `install-service` | **done** |
 | **M3** linux release matrix (x86_64/aarch64 × gnu/musl), Docker image, CI release workflow | **done** |
-| **M4** hardening: unit + e2e suites, fuzz-ish inputs, orphan-process checks, nightly network suite | **done** |
+| **M4** hardening: unit/e2e/service suites, robustness inputs, concurrency, orphan checks, nightly suite | **done** |
 
-Verified end-to-end (`tests/e2e.sh`, 12 checks) on Linux x86_64 with the official `yt-dlp_linux`
-2026.10.26 payload and a minimal LGPL ffmpeg 7.1 build:
+Verified on Linux x86_64 with the official `yt-dlp_linux` 2026.10.26 payload and a minimal LGPL
+ffmpeg 7.1 build:
 
-- `GET /` is byte-identical to upstream `templates/index.html` (21,419 B).
-- `/api/info` → yt-dlp JSON mapping; errors keep upstream's last-stderr-line contract
-  (`HTTP Error 404` → the UI's `friendlyError()` mapping fires).
-- video job → MP4 (h264+aac); audio job → MP3 (both verified with ffprobe).
-- `/api/status` exposes live `progress`; `/api/cancel/<id>` stops the job and kills the engine group.
-- SIGTERM → exit 0, engine process groups killed (no orphan yt-dlp/ffmpeg).
-- `reclipz update` downloads the official asset, verifies SHA2-256SUMS, installs it into a versioned
-  cache dir and repoints `engine.json` (measured: 2.5 s for 41 MB on a warm connection).
-- `reclipz install-service --dry-run` renders a hardened user unit.
-- Cross builds validated: `aarch64-linux-musl` (payload `yt-dlp_musllinux_aarch64` + zig-cc-built
-  ffmpeg/ffprobe) produces a 57 MB aarch64 ELF.
+- `tests/e2e.sh` (11 checks): UI byte-identical, `/api/info`, error-string parity, MP4 (h264+aac),
+  MP3, **6 concurrent jobs**, live progress, cancellation, graceful shutdown with no orphan engine
+  processes.
+- `tests/service.sh`: real `systemctl --user` install → `active` → UI served byte-identically →
+  uninstall removes the unit. (`ProtectKernelModules` was dropped from the default unit because an
+  unprivileged user manager can reject it; `--no-hardening` is the escape hatch.)
+- Docker: `docker build` + `docker run` on the musl payloads → `selftest` passes inside the
+  container, UI is byte-identical, a video job produces an MP4, and output files are owned by uid
+  1000. Named volumes work out of the box; bind mounts must be `chown 1000:1000` (documented in the
+  README). The image build also runs `reclipz --help` to catch libc/target mismatches early.
+- `reclipz update`: downloads the official asset, verifies `SHA2-256SUMS`, installs into a versioned
+  cache dir and repoints `engine.json` (2.5 s for 41 MB); `--check`, `--version`, `--gpg`,
+  `--allow-unverified` supported. An engine-less build (`-Dpayload-dir=none`) can bootstrap itself.
+- Cross builds: `x86_64-linux-{gnu,musl}` and `aarch64-linux-{gnu,musl}`; `make_ffmpeg.sh --target`
+  cross-compiles ffmpeg/LAME with `zig cc` (validated for x86_64-musl and aarch64-musl).
+- `reclipz which --json`, `install-service --dry-run`, robustness tests for malformed
+  JSON/progress/filename inputs.
 
-Sizes: x86_64 release 52.6 MB unstripped / **49.0 MB stripped**; no-payload build 5.4 MB;
+Fixed during this validation pass: small files written through a buffered `File.Writer` were
+truncated to zero bytes (`File.close` does not flush); this affected `engine.json` and the generated
+systemd unit. `fsutil.writeFileAtomic` now flushes explicitly.
+
+Sizes: x86_64 release 57.4 MB unstripped / **49.0 MB stripped**; musl ~49 MB; no-payload 5.4 MB;
 one-time cache ~47 MB.
+
+Outstanding (environment-blocked, not code): the GitHub Actions workflows have not been executed
+here; the real-network nightly suite cannot run from this sandbox (YouTube is unreachable over its
+broken IPv6 route); a real-browser UI test is not automated (snap Chromium is blocked by AppArmor).
 
 ---
 

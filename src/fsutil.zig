@@ -36,6 +36,8 @@ pub fn writeFileAtomic(io: std.Io, gpa: std.mem.Allocator, path: []const u8, byt
         var buf: [1 << 16]u8 = undefined;
         var w = f.writer(io, &buf);
         try w.interface.writeAll(bytes);
+        // File.close() does not flush the writer buffer; small files would be truncated to 0.
+        try w.interface.flush();
     }
     try std.Io.Dir.cwd().rename(tmp, std.Io.Dir.cwd(), path, io);
     {

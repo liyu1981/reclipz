@@ -118,7 +118,13 @@ fn runServe(
 
     const paths = payload.resolve(scratch, io, cfg, env.*) catch |e| {
         log.err("engine unavailable: {s}", .{@errorName(e)});
-        log.err("hint: run `reclipz update`, `tools/fetch_payloads.sh`, or set RECLIPZ_YTDLP", .{});
+        switch (e) {
+            error.AccessDenied => log.err(
+                "hint: the cache dir '{s}' is not writable by this user; fix its ownership or set RECLIPZ_CACHE_DIR",
+                .{cfg.cache_dir},
+            ),
+            else => log.err("hint: run `reclipz update`, `tools/fetch_payloads.sh`, or set RECLIPZ_YTDLP", .{}),
+        }
         std.process.exit(1);
     };
     var mutable_paths = paths;
@@ -261,11 +267,47 @@ fn runWhich(
     cfg: *config.Config,
     rest: []const []const u8,
 ) !void {
-    _ = rest;
     const paths = payload.resolve(scratch, io, cfg, env.*) catch |e| {
         std.debug.print("engine unavailable: {s}\n", .{@errorName(e)});
         std.process.exit(1);
     };
+
+    if (rest.len > 0 and std.mem.eql(u8, rest[0], "--json")) {
+        const builtin = @import("builtin");
+        const WhichJson = struct {
+            reclipz: []const u8,
+            target: []const u8,
+            arch: []const u8,
+            abi: []const u8,
+            ytdlp: []const u8,
+            ytdlp_version: []const u8,
+            ytdlp_source: []const u8,
+            ffmpeg: ?[]const u8,
+            ffprobe: ?[]const u8,
+            cache: []const u8,
+            downloads: []const u8,
+        };
+        var out = std.Io.Writer.Allocating.init(scratch);
+        defer out.deinit();
+        try std.json.Stringify.value(WhichJson{
+            .reclipz = version_string,
+            .target = @tagName(builtin.os.tag),
+            .arch = @tagName(builtin.cpu.arch),
+            .abi = @tagName(builtin.abi),
+            .ytdlp = paths.ytdlp,
+            .ytdlp_version = paths.version,
+            .ytdlp_source = @tagName(paths.source),
+            .ffmpeg = paths.ffmpeg,
+            .ffprobe = paths.ffprobe,
+            .cache = cfg.cache_dir,
+            .downloads = cfg.download_dir,
+        }, .{}, &out.writer);
+        try out.writer.writeByte('\n');
+        // Machine-readable output goes to stdout (the rest of the CLI logs to stderr).
+        try std.Io.File.stdout().writeStreamingAll(io, out.written());
+        return;
+    }
+
     std.debug.print("reclipz    {s}\n", .{version_string});
     std.debug.print("target     {s}-{s}\n", .{ @tagName(@import("builtin").cpu.arch), @tagName(@import("builtin").abi) });
     std.debug.print("yt-dlp     {s}\n", .{paths.ytdlp});
@@ -409,8 +451,10 @@ fn runInstallService(
             svc.enable = false;
         } else if (std.mem.eql(u8, a, "--linger")) {
             svc.linger = true;
+        } else if (std.mem.eql(u8, a, "--no-hardening")) {
+            svc.hardening = false;
         } else if (isHelp(a)) {
-            std.debug.print("usage: reclipz install-service [--dry-run] [--force] [--no-enable] [--linger] [serve options]\n", .{});
+            std.debug.print("usage: reclipz install-service [--dry-run] [--force] [--no-enable] [--linger] [--no-hardening] [serve options]\n", .{});
             return;
         } else {
             try serve_args.append(scratch, a);

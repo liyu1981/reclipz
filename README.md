@@ -53,7 +53,9 @@ journalctl --user -u reclipz -f
 
 `--dry-run` prints the generated `~/.config/systemd/user/reclipz.service` without writing it. The
 unit runs `reclipz serve`, restarts on failure, and ships hardening flags (`NoNewPrivileges`,
-`PrivateTmp`, `ProtectSystem=full`, …).
+`PrivateTmp`, `ProtectSystem=full`, `ProtectKernelTunables`, …). If your user manager cannot apply
+them (some containers fail with `Failed to drop capabilities`), re-run with `--no-hardening`.
+`tests/service.sh` verifies the whole flow against a live user systemd.
 
 ### Keep the engine current
 
@@ -75,6 +77,10 @@ zig build -Dtarget=x86_64-linux-musl -Doptimize=ReleaseSmall
 docker compose up -d
 ```
 
+The image runs as uid 1000. Named volumes (as in `docker-compose.yml`) inherit the image's
+ownership and work out of the box; with bind mounts, `chown -R 1000:1000` the host directories (or
+pass `--user $(id -u):$(id -g)`), otherwise the engine payload cannot be extracted into `/cache`.
+
 ## Features
 
 | | |
@@ -91,6 +97,43 @@ docker compose up -d
 
 Measured on Linux x86_64: **49 MB** stripped binary, 47 MB one-time cache, ~0.8 s engine overhead per
 invocation (PyInstaller self-extract). Builds without payloads are ~5 MB (`-Dpayload-dir=none`).
+
+## Migrating from ReClip
+
+ReClip needs `python3`, `flask`, `yt-dlp` and `ffmpeg`; reclipz needs none of that.
+
+1. Build (or download) the `reclipz` binary — see *Quick start*.
+2. Stop the old instance (`Ctrl-C`, or `docker compose down`).
+3. Run `./reclipz` (or `./reclipz install-service`). The web UI, API, download directory layout and
+   filename rules are unchanged, so existing clients/bookmarks keep working.
+4. If you used a `docker-compose.yml` from upstream, the only differences are the image build
+   (no Python base image) and the addition of a `/cache` volume for the engine payload.
+
+`RECLIP_NO_UPDATE` (upstream's "skip `pip install -U yt-dlp`") is accepted but unnecessary; engine
+updates are explicit: `reclipz update`.
+
+## HTTPS / reverse proxy
+
+reclipz speaks plain HTTP on `HOST:PORT`, exactly like upstream ReClip, and intentionally does not
+implement TLS or authentication. Put it behind a reverse proxy if it is exposed beyond localhost:
+
+```nginx
+server {
+  listen 443 ssl;
+  server_name clip.example.com;
+  client_max_body_size 1m;
+  location / {
+    proxy_pass http://127.0.0.1:8899;
+    proxy_http_version 1.1;
+    proxy_read_timeout 600s;
+    proxy_buffering off;          # /api/file streams large downloads
+  }
+}
+```
+
+Caddy equivalent: `clip.example.com { reverse_proxy 127.0.0.1:8899 }`.
+Keep `HOST=127.0.0.1` when a proxy runs on the same host; use `HOST=0.0.0.0` only inside a container
+network you control.
 
 ## Configuration
 
@@ -128,7 +171,9 @@ needed). CI (`.github/workflows/release.yml`) builds all four targets and publis
 ```bash
 zig build test                  # unit tests (JSON mapping, progress, unit file, checksums, ...)
 zig build -Doptimize=ReleaseSafe
-tests/e2e.sh                    # end-to-end: UI, info, MP4, MP3, progress, cancel, shutdown
+tests/e2e.sh                    # end-to-end: UI, info, MP4, MP3, concurrency, progress, cancel, shutdown
+tests/service.sh                # install-service against a live user systemd (skips if unavailable)
+tests/network.sh                # real-site smoke test (nightly CI)
 zig fmt src build.zig
 ```
 

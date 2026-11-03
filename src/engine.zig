@@ -481,3 +481,91 @@ test "progress line ignores other output" {
     const p = parseProgressLine("reclipz|NA|NA|NA|NA|NA|NA|NA").?;
     try std.testing.expect(p.isEmpty());
 }
+
+test "robustness: malformed info payloads" {
+    const alloc = std.testing.allocator;
+    const cases = [_][]const u8{
+        "",
+        "   ",
+        "null",
+        "[]",
+        "{}",
+        "not json",
+        "{\"formats\":\"nope\"}",
+        "{\"formats\":[{}]}",
+        "{\"formats\":[{\"format_id\":\"1\",\"height\":-5,\"vcodec\":\"avc1\"}]}",
+        "{\"formats\":[{\"format_id\":\"1\",\"height\":1e18,\"vcodec\":\"avc1\"}]}",
+        "{\"formats\":[{\"format_id\":\"1\",\"height\":720,\"vcodec\":\"avc1\",\"tbr\":\"fast\"}]}",
+        "{\"title\":42,\"formats\":[]}",
+        "{\"formats\":[{\"format_id\":\"a\",\"height\":720,\"vcodec\":\"avc1\"},{\"format_id\":\"b\",\"height\":720,\"vcodec\":\"avc1\"}]}",
+        "{\"formats\":[{\"height\":720,\"vcodec\":\"avc1\"}]}",
+        "{\"formats\":[{\"format_id\":\"x\",\"height\":720,\"vcodec\":\"avc1\"}",
+    };
+    for (cases) |case| {
+        if (parseInfo(alloc, case)) |info| {
+            defer {
+                alloc.free(info.title);
+                alloc.free(info.thumbnail);
+                alloc.free(info.uploader);
+                for (info.formats) |f| {
+                    alloc.free(f.id);
+                    alloc.free(f.label);
+                }
+                alloc.free(info.formats);
+            }
+            for (info.formats) |f| try std.testing.expect(f.height <= 100_000);
+        } else |_| {
+            // Rejecting garbage is acceptable behaviour too.
+        }
+    }
+}
+
+test "robustness: malformed playlist payloads" {
+    const alloc = std.testing.allocator;
+    const bad = [_][]const u8{
+        "",
+        "null",
+        "[]",
+        "{}",
+        "{\"entries\":null}",
+        "{\"entries\":[1,2,3]}",
+        "{\"entries\":[{\"url\":null}]}",
+        "{\"entries\":[{\"url\":\"\"}]}",
+    };
+    for (bad) |case| {
+        if (parsePlaylistUrls(alloc, case)) |urls| {
+            defer alloc.free(urls);
+            for (urls) |u| try std.testing.expect(u.len > 0);
+        } else |_| {}
+    }
+}
+
+test "robustness: odd progress lines" {
+    const lines = [_][]const u8{
+        "",
+        "reclipz",
+        "reclipz|",
+        "reclipz|||||||",
+        "reclipz|abc|def|ghi|jkl|mno|pqr|stu",
+        "reclipz|1e400|1e400|NA|NaN|Infinity|-1|-1",
+        "RECLIPZ|1|2|3|4|5|6|7",
+    };
+    for (lines) |line| _ = parseProgressLine(line);
+}
+
+test "robustness: hostile filenames" {
+    const alloc = std.testing.allocator;
+    var long_buf: [10000]u8 = undefined;
+    @memset(&long_buf, 'a');
+    const name = try sanitizeFilename(alloc, &long_buf);
+    defer alloc.free(name);
+    try std.testing.expect(name.len <= 100);
+
+    const forbidden = try sanitizeFilename(alloc, "/\\:*?\"<>|");
+    defer alloc.free(forbidden);
+    try std.testing.expectEqual(@as(usize, 0), forbidden.len);
+
+    const unicode = try sanitizeFilename(alloc, "日本語 – ünïcode.mp4");
+    defer alloc.free(unicode);
+    try std.testing.expect(unicode.len > 0);
+}
