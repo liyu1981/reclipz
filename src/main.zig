@@ -117,13 +117,14 @@ fn runServe(
     };
 
     const paths = payload.resolve(scratch, io, cfg, env.*) catch |e| {
-        log.err("engine unavailable: {s}", .{@errorName(e)});
-        switch (e) {
-            error.AccessDenied => log.err(
-                "hint: the cache dir '{s}' is not writable by this user; fix its ownership or set RECLIPZ_CACHE_DIR",
-                .{cfg.cache_dir},
-            ),
-            else => log.err("hint: run `reclipz update`, `tools/fetch_payloads.sh`, or set RECLIPZ_YTDLP", .{}),
+        const name = @errorName(e);
+        log.err("engine unavailable: {s}", .{name});
+        // Compare by name: with `-Dpayload-dir=none` the inferred error set does not contain
+        // AccessDenied, so `switch (e) { error.AccessDenied => ... }` would not compile.
+        if (std.mem.eql(u8, name, "AccessDenied")) {
+            log.err("hint: the cache dir '{s}' is not writable by this user; fix its ownership or set RECLIPZ_CACHE_DIR", .{cfg.cache_dir});
+        } else {
+            log.err("hint: run `reclipz update`, `tools/fetch_payloads.sh`, or set RECLIPZ_YTDLP", .{});
         }
         std.process.exit(1);
     };
