@@ -1,0 +1,14 @@
+.{
+    .name = .reclipz,
+    .version = "0.1.0",
+    .fingerprint = 0xc929d4c81fb68dc8,
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "LICENSE",
+        "README.md",
+    },
+}
